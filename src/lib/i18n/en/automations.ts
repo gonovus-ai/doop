@@ -33,6 +33,8 @@ export const automations = {
   incompleteSlackMessage: 'Write a Slack message',
   incompleteLinearTeam: 'Choose a Linear team',
   incompleteLinearTitle: 'Write a Linear ticket title',
+  incompleteSpecFlowProject: 'Choose a SpecFlow project',
+  incompleteSpecFlowTitle: 'Write a SpecFlow work item title',
 
   /* the example automations: what the cards and tiles say */
   exampleApprovedSizesName: 'Make different sizes',
@@ -243,4 +245,49 @@ export const automations = {
   installSlack: 'Install Doop in Slack',
   slackDisconnectCopy:
     'Stop @Doop mentions and pending Slack design work in this workspace. Existing canvases stay. To remove Doop from Slack too, uninstall the app in Slack’s workspace settings.',
+
+  /* SpecFlow */
+  createSpecFlowWorkItem: 'Create SpecFlow work item',
+  specflowProjectLabel: 'SpecFlow project',
+  chooseSpecFlowProject: 'Choose a project',
+  loadSpecFlowProjectsFailed: 'Could not load SpecFlow projects. Check your connection.',
+  specflowScreenLabel: 'Sync approved frame to screen (optional)',
+  specflowScreenNone: 'No Product Map screen sync',
+  specflowTitleLabel: 'SpecFlow work item title',
+  specflowDescriptionLabel: 'SpecFlow work item description',
+  specflowPitch: 'Read Specs & Work Items, sync approved designs, and receive delegated tasks',
+  specflowDetail: '{host} · {count} projects',
+  specflowApiActive: 'MCP tools & automation actions enabled',
+  specflowWebhookActive: 'Inbound delegation active → @{agent}',
+  connectSpecFlow: 'Connect SpecFlow',
+  manageSpecFlow: 'Manage SpecFlow',
+  specflowLede:
+    'Connect your SpecFlow instance so agents can read Specs/Work Items and receive delegated design tasks.',
+  specflowApiSection: 'SpecFlow User API key',
+  specflowKeyHelp:
+    'Generate a User API key in SpecFlow (Account → API Keys) with access to the workspaces and projects you want Doop agents to read or update.',
+  specflowUrlLabel: 'SpecFlow server URL',
+  specflowKeyLabel: 'SpecFlow User API key',
+  specflowKeyPlaceholder: 'sf_… / User API key',
+  specflowConnected: 'SpecFlow connected.',
+  specflowKeyReplaced: 'SpecFlow key updated.',
+  specflowConnectFailed: 'Could not connect SpecFlow.',
+  specflowWebhookSection: 'Inbound delegation webhook (SpecFlow → Doop)',
+  specflowWebhookHelp:
+    'Register a Webhook Agent or Integration in SpecFlow pointing at this URL, then paste its whsec_ signing secret here. Assigned work items automatically create a Doop canvas and dispatch to your chosen agent.',
+  specflowWorkspaceLabel: 'Target Doop workspace',
+  specflowWorkspacePersonal: 'Personal space',
+  specflowTargetAgentLabel: 'Target agent handle',
+  specflowSigningSecretLabel: 'SpecFlow webhook signing secret',
+  specflowSigningSecretReplace: 'Leave blank to keep existing signing secret',
+  specflowWebhookEnable: 'Enable webhook',
+  specflowWebhookUpdate: 'Save webhook',
+  specflowWebhookDisable: 'Disable',
+  specflowWebhookSaved: 'SpecFlow inbound webhook saved.',
+  specflowWebhookRemoved: 'SpecFlow inbound webhook disabled.',
+  specflowWebhookFailed: 'Could not save SpecFlow webhook settings.',
+  specflowDisconnectCopy:
+    'Disconnect SpecFlow API access and remove your inbound delegation webhook. Existing Doop canvases stay.',
+  copy: 'Copy',
+  copied: 'Copied',
 } as const

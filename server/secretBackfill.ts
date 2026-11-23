@@ -8,6 +8,7 @@ import {
   linearInstallations,
   modelAccounts,
   slackInstallations,
+  specflowWebhooks,
   webhooks,
 } from './db/schema.ts'
 import { needsReseal, open } from './secretBox.ts'
@@ -29,6 +30,7 @@ const SEALED: { table: PgTable; key: AnyPgColumn; columns: AnyPgColumn[] }[] = [
     columns: [linearInstallations.accessToken, linearInstallations.refreshToken],
   },
   { table: slackInstallations, key: slackInstallations.teamId, columns: [slackInstallations.botToken] },
+  { table: specflowWebhooks, key: specflowWebhooks.id, columns: [specflowWebhooks.signingSecret] },
 ]
 
 /** The table's property name for a column, which is what `.set()` is keyed by. */

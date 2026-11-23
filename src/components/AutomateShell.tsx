@@ -65,7 +65,8 @@ export function ApprovalTile({ size = 24 }: { size?: number }) {
   )
 }
 
-type MarkStep = { type: 'pull'; provider?: string } | { type: 'agent'; roles: string[] } | { type: 'slack' | 'linear' }
+type MarkStep =
+  { type: 'pull'; provider?: string } | { type: 'agent'; roles: string[] } | { type: 'slack' | 'linear' | 'specflow' }
 
 /** The chain that summarises an automation: clock, then a Meta tile per
  *  pull and a role mark per agent, joined by short dashes when `joined`. */
@@ -88,7 +89,7 @@ export function StepChain({
   steps.forEach((s, i) => {
     if (s.type === 'pull')
       marks.push(<PullMark key={`p${i}`} provider={s.provider} size={size} className="border border-line bg-surface" />)
-    else if (s.type === 'slack' || s.type === 'linear')
+    else if (s.type === 'slack' || s.type === 'linear' || s.type === 'specflow')
       marks.push(<PullMark key={`d${i}`} provider={s.type} size={size} />)
     else if (s.type === 'agent')
       marks.push(
@@ -200,6 +201,8 @@ const INCOMPLETE_LABEL: Record<string, PlainMessageKey> = {
   'Write a Slack message': 'automations.incompleteSlackMessage',
   'Choose a Linear team': 'automations.incompleteLinearTeam',
   'Write a Linear ticket title': 'automations.incompleteLinearTitle',
+  'Choose a SpecFlow project': 'automations.incompleteSpecFlowProject',
+  'Write a SpecFlow work item title': 'automations.incompleteSpecFlowTitle',
 }
 
 export function incompleteText(t: Translate, reason: string): string {

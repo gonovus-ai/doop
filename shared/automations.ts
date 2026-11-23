@@ -57,6 +57,18 @@ export interface LinearStep {
   description: string
 }
 
+export interface SpecFlowStep {
+  id: string
+  type: 'specflow'
+  canvasId: string
+  projectId: string
+  title: string
+  description: string
+  /** optional SpecFlow workspace + Product Map screen to also upload the approved frame PNG */
+  workspaceId?: string
+  screenId?: string
+}
+
 export interface AgentStep {
   id: string
   type: 'agent'
@@ -68,7 +80,7 @@ export interface AgentStep {
   canvasId: string
 }
 
-export type Step = PullStep | AgentStep | SlackStep | LinearStep
+export type Step = PullStep | AgentStep | SlackStep | LinearStep | SpecFlowStep
 
 /** A durable run keeps the approved sources and the steps as they were at dispatch. */
 export interface ApprovedSource {
@@ -341,6 +353,19 @@ export function normalizeSteps(raw: unknown): Step[] | string {
         title: field('title', 200),
         description: field('description'),
       })
+    } else if (s.type === 'specflow') {
+      const workspaceId = field('workspaceId', 200)
+      const screenId = field('screenId', 200)
+      out.push({
+        id: stepId(s.id, i),
+        type: 'specflow',
+        canvasId,
+        projectId: field('projectId', 200),
+        title: field('title', 300),
+        description: field('description'),
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(screenId ? { screenId } : {}),
+      })
     } else if (s.type === 'pull') {
       out.push({
         id: stepId(s.id, i),
@@ -383,6 +408,8 @@ export function incompleteReason(steps: Step[], trigger?: AutomationTrigger): st
     if (s.type === 'slack' && !s.message) return 'Write a Slack message'
     if (s.type === 'linear' && !s.teamId) return 'Choose a Linear team'
     if (s.type === 'linear' && !s.title) return 'Write a Linear ticket title'
+    if (s.type === 'specflow' && !s.projectId) return 'Choose a SpecFlow project'
+    if (s.type === 'specflow' && !s.title) return 'Write a SpecFlow work item title'
   }
   return undefined
 }
@@ -395,6 +422,7 @@ export type ExampleStep =
   | Omit<AgentStep, 'id' | 'canvasId'>
   | Omit<SlackStep, 'id' | 'canvasId'>
   | Omit<LinearStep, 'id' | 'canvasId'>
+  | Omit<SpecFlowStep, 'id' | 'canvasId'>
 
 export interface AutomationExample {
   id: string

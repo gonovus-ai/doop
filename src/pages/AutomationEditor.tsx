@@ -13,6 +13,7 @@ import {
   type AutomationTrigger,
   type SlackStep,
   type LinearStep,
+  type SpecFlowStep,
   type Automation,
   type AutomationExample,
   type AutomationRun,
@@ -352,9 +353,11 @@ export function AutomationEditor({ automationId }: { automationId: string }) {
           }
         : kind === 'linear'
           ? { id, type: 'linear', canvasId, teamId: '', title: 'Follow up on approved designs', description: '' }
-          : kind === 'pull'
-            ? { id, type: 'pull', provider: 'meta', accountId: '', filter: 'active', canvasId }
-            : { id, type: 'agent', title: '', prompt: '', roles: ['doop'], canvasId }
+          : kind === 'specflow'
+            ? { id, type: 'specflow', canvasId, projectId: '', title: 'Follow up on approved designs', description: '' }
+            : kind === 'pull'
+              ? { id, type: 'pull', provider: 'meta', accountId: '', filter: 'active', canvasId }
+              : { id, type: 'agent', title: '', prompt: '', roles: ['doop'], canvasId }
     setDraft({ ...draft, steps: [...draft.steps, step] })
     setAdding(false)
   }
@@ -498,7 +501,7 @@ export function AutomationEditor({ automationId }: { automationId: string }) {
                         onChange={(patch) => patchStep(step.id, patch)}
                         onRemove={() => removeStep(step.id)}
                       />
-                    ) : step.type === 'slack' || step.type === 'linear' ? (
+                    ) : step.type === 'slack' || step.type === 'linear' || step.type === 'specflow' ? (
                       <DeliveryNode
                         step={step}
                         canvases={stepCanvases}
@@ -811,7 +814,7 @@ function DeliveryNode({
   onChange,
   onRemove,
 }: {
-  step: SlackStep | LinearStep
+  step: SlackStep | LinearStep | SpecFlowStep
   canvases: CanvasMeta[]
   integrations: IntegrationsStatus | null
   onChange: (patch: Partial<Step>) => void
@@ -822,6 +825,10 @@ function DeliveryNode({
   const connected = !!integrations && !!integration?.isConnected(integrations)
   const [teams, setTeams] = useState<{ id: string; name: string; key: string }[]>([])
   const [teamsFailed, setTeamsFailed] = useState(false)
+  const [sfProjects, setSfProjects] = useState<{ id: string; name: string; workspaceId: string; key?: string }[]>([])
+  const [sfProjectsFailed, setSfProjectsFailed] = useState(false)
+  const [sfScreens, setSfScreens] = useState<{ id: string; name: string }[]>([])
+  const sfWorkspaceId = step.type === 'specflow' ? step.workspaceId : undefined
   useEffect(() => {
     if (step.type !== 'linear' || !connected) return
     let canceled = false
@@ -840,6 +847,39 @@ function DeliveryNode({
       canceled = true
     }
   }, [step.type, connected])
+  useEffect(() => {
+    if (step.type !== 'specflow' || !connected) return
+    let canceled = false
+    api
+      .automationSpecFlowProjects()
+      .then((list) => {
+        if (!canceled) {
+          setSfProjects(list)
+          setSfProjectsFailed(false)
+        }
+      })
+      .catch(() => {
+        if (!canceled) setSfProjectsFailed(true)
+      })
+    return () => {
+      canceled = true
+    }
+  }, [step.type, connected])
+  useEffect(() => {
+    if (step.type !== 'specflow' || !connected || !sfWorkspaceId) return
+    let canceled = false
+    api
+      .automationSpecFlowScreens(sfWorkspaceId)
+      .then((list) => {
+        if (!canceled) setSfScreens(list)
+      })
+      .catch(() => {
+        if (!canceled) setSfScreens([])
+      })
+    return () => {
+      canceled = true
+    }
+  }, [step.type, connected, sfWorkspaceId])
   return (
     <div data-pan-node className={nodeCls}>
       <Port side="in" />
@@ -847,7 +887,11 @@ function DeliveryNode({
       <div className="flex items-center gap-2">
         <PullMark provider={step.type} />
         <span className="text-copy font-semibold">
-          {step.type === 'slack' ? t('automations.postToSlack') : t('automations.createLinearTicket')}
+          {step.type === 'slack'
+            ? t('automations.postToSlack')
+            : step.type === 'specflow'
+              ? t('automations.createSpecFlowWorkItem')
+              : t('automations.createLinearTicket')}
         </span>
         <RemoveStep onRemove={onRemove} />
       </div>
@@ -872,6 +916,67 @@ function DeliveryNode({
             value={step.message}
             maxLength={MAX_PROMPT}
             onChange={(e) => onChange({ message: e.target.value })}
+          />
+        </>
+      ) : step.type === 'specflow' ? (
+        <>
+          <Select
+            value={step.projectId}
+            onValueChange={(projectId) => {
+              const proj = sfProjects.find((p) => p.id === projectId)
+              onChange({ projectId, workspaceId: proj?.workspaceId ?? '', screenId: '' })
+            }}
+          >
+            <SelectTrigger className="mt-2 w-full" size="sm" aria-label={t('automations.specflowProjectLabel')}>
+              <SelectValue placeholder={t('automations.chooseSpecFlowProject')} />
+            </SelectTrigger>
+            <SelectContent>
+              {sfProjects.map((proj) => (
+                <SelectItem key={proj.id} value={proj.id}>
+                  {proj.name}
+                  {proj.key ? ` · ${proj.key}` : ''}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {sfProjectsFailed && (
+            <p role="alert" className="mt-1 text-caption text-accent-ink">
+              {t('automations.loadSpecFlowProjectsFailed')}
+            </p>
+          )}
+          {sfWorkspaceId && sfScreens.length > 0 && (
+            <Select
+              value={step.screenId || '__none__'}
+              onValueChange={(v) => onChange({ screenId: v === '__none__' ? '' : v })}
+            >
+              <SelectTrigger className="mt-2 w-full" size="sm" aria-label={t('automations.specflowScreenLabel')}>
+                <SelectValue placeholder={t('automations.specflowScreenNone')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">{t('automations.specflowScreenNone')}</SelectItem>
+                {sfScreens.map((sc) => (
+                  <SelectItem key={sc.id} value={sc.id}>
+                    {sc.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          <Input
+            className="mt-2"
+            aria-label={t('automations.specflowTitleLabel')}
+            placeholder={t('automations.ticketTitlePlaceholder')}
+            value={step.title}
+            maxLength={300}
+            onChange={(e) => onChange({ title: e.target.value })}
+          />
+          <Textarea
+            className="mt-2"
+            aria-label={t('automations.specflowDescriptionLabel')}
+            placeholder={t('automations.ticketDescriptionPlaceholder')}
+            value={step.description}
+            maxLength={MAX_PROMPT}
+            onChange={(e) => onChange({ description: e.target.value })}
           />
         </>
       ) : (
@@ -1147,11 +1252,11 @@ function StepPicker({ onPick, onCancel }: { onPick: (kind: string) => void; onCa
             <span className="text-caption text-ink-soft">{exampleBlurb(t, e)}</span>
           </button>
         ))}
-        {(['linear', 'slack'] as const).map((provider) => (
+        {(['specflow', 'slack'] as const).map((provider) => (
           <button type="button" key={provider} className={tile} onClick={() => onPick(provider)}>
             <PullMark provider={provider} size={22} />
             <b className="text-body font-medium">
-              {provider === 'linear' ? t('automations.createLinearTicket') : t('automations.postToSlack')}
+              {provider === 'specflow' ? t('automations.createSpecFlowWorkItem') : t('automations.postToSlack')}
             </b>
             <span className="text-caption text-ink-soft">{t('automations.shareResults')}</span>
           </button>

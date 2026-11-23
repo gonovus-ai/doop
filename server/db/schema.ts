@@ -887,6 +887,25 @@ export const integrations = pgTable(
   (t) => [uniqueIndex('integrations_user_provider_idx').on(t.userId, t.provider)],
 )
 
+/** SpecFlow inbound webhook receivers: one per user, mounted at
+ *  `/webhooks/specflow/<id>` using Standard Webhooks signatures (`whsec_...`).
+ *  When SpecFlow assigns or mentions a Webhook Agent / Integration pointing
+ *  here, Doop creates a canvas in `workspaceId` and dispatches work to
+ *  `targetAgent` (e.g. external `@claude`). */
+export const specflowWebhooks = pgTable(
+  'specflow_webhooks',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull(),
+    workspaceId: text('workspace_id'),
+    targetAgent: text('target_agent').notNull().default('claude'),
+    signingSecret: sealedText('signing_secret').notNull(),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [uniqueIndex('specflow_webhooks_user_idx').on(t.userId)],
+)
+
 /** A scheduled workflow: `schedule` says when, `steps` say what (see
  *  shared/automations.ts). Owned by a user; every step names a canvas the
  *  owner must be able to reach. Cold path — read by the scheduler tick and

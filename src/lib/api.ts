@@ -1059,6 +1059,12 @@ export const api = {
   /* integrations: per-user connections to outside services */
   integrations: () => req<IntegrationsStatus>('/api/integrations'),
   automationLinearTeams: () => req<{ id: string; name: string; key: string }[]>('/api/integrations/linear/teams'),
+  automationSpecFlowProjects: () =>
+    req<{ id: string; name: string; workspaceId: string; key?: string }[]>('/api/integrations/specflow/projects'),
+  automationSpecFlowScreens: (workspaceId: string) =>
+    req<{ id: string; name: string }[]>(
+      `/api/integrations/specflow/screens?workspaceId=${encodeURIComponent(workspaceId)}`,
+    ),
   disconnectMeta: () => req<IntegrationsStatus>('/api/integrations/meta', { method: 'DELETE' }),
 }
 

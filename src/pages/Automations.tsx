@@ -214,7 +214,7 @@ export function Automations() {
                     <div className="flex min-w-0 items-center gap-2.5">
                       {first?.type === 'pull' ? (
                         <MetaTile size={24} className="border border-line bg-surface" />
-                      ) : first?.type === 'slack' || first?.type === 'linear' ? (
+                      ) : first?.type === 'slack' || first?.type === 'linear' || first?.type === 'specflow' ? (
                         <PullMark provider={first.type} size={24} />
                       ) : first?.type === 'agent' ? (
                         <span className="grid size-6 flex-none place-items-center rounded-row border border-line bg-surface">

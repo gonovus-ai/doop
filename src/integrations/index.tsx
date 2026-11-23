@@ -1,8 +1,8 @@
 import type { ComponentType, ReactNode } from 'react'
 import type { IntegrationsStatus } from '../lib/api'
 import type { PlainMessageKey } from '../lib/i18n'
-import { linearIntegration } from './linear'
 import { slackIntegration } from './slack'
+import { specflowIntegration } from './specflow'
 
 /**
  * Client extensions, the mirror of `server/extensions.ts`: each integration
@@ -65,4 +65,4 @@ export type ClientIntegration =
       }
     })
 
-export const clientIntegrations: ClientIntegration[] = [linearIntegration, slackIntegration]
+export const clientIntegrations: ClientIntegration[] = [specflowIntegration, slackIntegration]

@@ -3,9 +3,10 @@ import type { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
 import type { CanvasRole } from '../shared/canvasRole.ts'
-import type { PullStep, SlackStep, LinearStep } from '../shared/automations.ts'
+import type { PullStep, SlackStep, LinearStep, SpecFlowStep } from '../shared/automations.ts'
 import { linearExtension } from './linear/extension.ts'
 import { slackExtension } from './slack/extension.ts'
+import { specflowExtension } from './specflow/extension.ts'
 
 /**
  * Server extensions: integrations that are removable as a unit. The core
@@ -122,9 +123,9 @@ export interface ServerExtension {
     ctx: { ownerId: string; actor: Actor },
   ): Promise<string>
   runAutomationAction?(
-    step: SlackStep | LinearStep,
+    step: SlackStep | LinearStep | SpecFlowStep,
     ctx: { ownerId: string; context: string },
   ): Promise<{ summary: string; url?: string }>
 }
 
-export const extensions: ServerExtension[] = [linearExtension, slackExtension]
+export const extensions: ServerExtension[] = [specflowExtension, linearExtension, slackExtension]
