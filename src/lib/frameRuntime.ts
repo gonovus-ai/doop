@@ -15,10 +15,10 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 <html><head></head><body><script data-v-boot>
 (function () {
   'use strict'
-  ${FRAME_REPLAY_RUNTIME}
-  ${FRAME_DROP_RUNTIME}
-  ${FRAME_PROTO_RUNTIME}
-  ${DOOP_DS_RUNTIME_SCRIPT}
+  ${FRAME_REPLAY_RUNTIME};
+  ${FRAME_DROP_RUNTIME};
+  ${FRAME_PROTO_RUNTIME};
+  ${DOOP_DS_RUNTIME_SCRIPT};
   var dsOrigin = ''
   /* horizontal overscroll inside a frame must not chain to the parent page,
      where the browser turns it into a history back/forward swipe. A frame

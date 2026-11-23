@@ -19,7 +19,7 @@ import { buildDoopDsTag } from './designSystems.ts'
  * - Exposes `window.__doopReady` resolving only after all `<doop-ds>` elements have finished loading
  *   styles, scripts, and painting their first React frame.
  */
-export const DOOP_DS_RUNTIME_SCRIPT = `(function () {
+export const DOOP_DS_RUNTIME_SCRIPT = `;(function () {
   if (window.__doopSyncDs) return;
   var state = window.__doopDs || (window.__doopDs = {
     manifests: {},

@@ -11,6 +11,7 @@ import {
   validateDsVersion,
 } from '../shared/designSystems.ts'
 import { buildDoopDsPreviewHtml } from '../shared/doopDsRuntime.ts'
+import { FRAME_BOOTSTRAP } from '../src/lib/frameRuntime.ts'
 
 /**
  * End-to-end tests for Doop's Design System Registry against the REAL server:
@@ -493,5 +494,11 @@ describe('MCP tools end-to-end over /mcp', () => {
     })
     expect(previewHtml).toContain('<doop-ds ds="gonovus" component="Button"')
     expect(previewHtml).toContain('window.__doopDsOrigin=')
+
+    // Ensure FRAME_BOOTSTRAP has valid JS with proper statement separation before embedded IIFEs
+    const bootMatch = /<script data-v-boot>([\s\S]*?)<\/script>/.exec(FRAME_BOOTSTRAP)
+    expect(bootMatch).toBeTruthy()
+    expect(bootMatch![1]).not.toMatch(/window\.addEventListener\([^)]*\)\s*\n\s*\(function/)
+    expect(() => new Function(bootMatch![1]!)).not.toThrow()
   })
 })
