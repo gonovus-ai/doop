@@ -88,4 +88,18 @@ export const agents: Catalog['agents'] = {
   copied: 'Copiado',
   done: 'Concluir',
   briefOptional: 'Notas (opcional)',
+  webhookPayloadFormat: 'Formato do payload',
+  webhookPayloadFormatDoop: 'JSON de evento do Doop (padrão)',
+  webhookPayloadFormatText: 'Texto — campo "text" (Claude Code Routine)',
+  webhookPayloadFormatHint:
+    'Escolha este formato para endpoints como Anthropic Claude Code Routines que esperam um JSON com um único campo "text".',
+  webhookHeaders: 'Cabeçalhos HTTP personalizados (opcional)',
+  webhookHeadersPlaceholder:
+    'Authorization: Bearer sk-...\nanthropic-beta: experimental-cc-routine-2026-04-01\nanthropic-version: 2023-06-01',
+  webhookHeadersHint:
+    'Um Header: Valor por linha. Armazenado criptografado; os valores não são exibidos novamente após salvar.',
+  webhookHeadersConfigured:
+    'Cabeçalhos configurados: {names}. Deixe em branco para manter ou digite novos para substituir.',
+  webhookHeadersClear: 'Limpar cabeçalhos',
+  webhookHeadersCleared: 'Os cabeçalhos personalizados serão removidos ao salvar.',
 }

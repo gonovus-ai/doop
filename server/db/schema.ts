@@ -538,6 +538,10 @@ export const customAgents = pgTable(
     webhookUrl: text('webhook_url'),
     /** HMAC-SHA256 signing secret (encrypted at rest via secretBox) */
     webhookSecret: sealedText('webhook_secret'),
+    /** optional custom HTTP headers JSON (encrypted at rest via secretBox — may carry Bearer tokens) */
+    webhookHeaders: sealedText('webhook_headers'),
+    /** webhook JSON body shape: 'doop' (default) | 'text' ({"text": "..."}) */
+    webhookPayloadFormat: text('webhook_payload_format'),
     createdBy: text('created_by').notNull(),
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
     updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),

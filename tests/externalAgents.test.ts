@@ -14,6 +14,7 @@ interface ReceivedHook {
   deliveryId: string
   timestamp: string
   signature: string
+  headers: IncomingMessage['headers']
   rawBody: string
   body: Record<string, unknown>
 }
@@ -93,6 +94,7 @@ beforeAll(async () => {
         deliveryId: String(req.headers['x-doop-delivery'] ?? ''),
         timestamp: String(req.headers['x-doop-timestamp'] ?? ''),
         signature: String(req.headers['x-doop-signature'] ?? ''),
+        headers: req.headers,
         rawBody,
         body: JSON.parse(rawBody) as Record<string, unknown>,
       }
@@ -482,5 +484,50 @@ describe('Retries, idempotency, failure state, polling fallback (list_mentions) 
       return item?.deliveryStatus === 'delivered' ? item : undefined
     })
     expect(recovered.deliveryStatus).toBe('delivered')
+  })
+
+  it('supports custom encrypted HTTP headers and {"text": "..."} payload format for Claude Code Routines', async () => {
+    const patchRes = await owner.patch(`/api/agents/claude?workspace=${workspaceId}`, {
+      webhookUrl: hookUrl,
+      webhookPayloadFormat: 'text',
+      webhookHeaders: {
+        Authorization: 'Bearer test-routine-secret-token',
+        'anthropic-beta': 'experimental-cc-routine-2026-04-01',
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+    })
+    expect(patchRes.status).toBe(200)
+    const patched = (await patchRes.json()) as {
+      webhookPayloadFormat?: string
+      webhookHeaderNames?: string[]
+      webhookHeaders?: unknown
+    }
+    expect(patched.webhookPayloadFormat).toBe('text')
+    expect(patched.webhookHeaderNames).toEqual(['Authorization', 'anthropic-beta', 'anthropic-version', 'Content-Type'])
+    // Header values must never be leaked back in API responses
+    expect(patched.webhookHeaders).toBeUndefined()
+
+    received.length = 0
+    hookMode = 'ok'
+    const res = await owner.post(`/api/frames/${frameId}/comments`, {
+      elementId,
+      snippet: '<button id="cta">Submit</button>',
+      text: '@claude 测试 Claude Routine 文本格式推送',
+    })
+    expect(res.status).toBe(200)
+    const created = (await res.json()) as { id: string }
+
+    const hook = await waitFor(() => received.find((r) => r.event === 'agent.comment_mentioned'))
+    expect(hook.headers.authorization).toBe('Bearer test-routine-secret-token')
+    expect(hook.headers['anthropic-beta']).toBe('experimental-cc-routine-2026-04-01')
+    expect(hook.headers['anthropic-version']).toBe('2023-06-01')
+    expect(hook.headers['content-type']).toBe('application/json')
+    expect(Object.keys(hook.body)).toEqual(['text'])
+    const promptText = String(hook.body.text)
+    expect(promptText).toContain('@claude 测试 Claude Routine 文本格式推送')
+    expect(promptText).toContain(frameId)
+    expect(promptText).toContain(elementId)
+    expect(promptText).toContain(created.id)
   })
 })

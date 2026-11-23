@@ -13,6 +13,7 @@ import {
   handleFor,
   type BuiltInAgent,
   type CustomAgent,
+  type WebhookPayloadFormat,
 } from '../../shared/customAgents'
 import { RoleMark } from './RoleMark'
 import { useSkillMenu } from './SkillMenu'
@@ -285,6 +286,11 @@ function AgentForm({
   const avatarPreviewUrl = useMemo(() => (pendingAvatar ? URL.createObjectURL(pendingAvatar) : null), [pendingAvatar])
   const [uploadingAvatar, setUploadingAvatar] = useState(false)
   const [webhookUrl, setWebhookUrl] = useState(existingCustom?.webhookUrl ?? '')
+  const [webhookPayloadFormat, setWebhookPayloadFormat] = useState<WebhookPayloadFormat>(
+    existingCustom?.webhookPayloadFormat ?? 'doop',
+  )
+  const [webhookHeadersText, setWebhookHeadersText] = useState('')
+  const [clearWebhookHeaders, setClearWebhookHeaders] = useState(false)
   const [webhookSecretInput, setWebhookSecretInput] = useState('')
   const [agentKeyId, setAgentKeyId] = useState(existingCustom?.agentKeyId ?? '')
   const [agentKeys, setAgentKeys] = useState<AgentKeyInfo[]>([])
@@ -422,19 +428,44 @@ function AgentForm({
     }
   }
 
+  function parseHeaderLines(raw: string): Record<string, string> | null {
+    const lines = raw
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean)
+    if (!lines.length) return null
+    const headers: Record<string, string> = {}
+    for (const line of lines) {
+      const sep = line.indexOf(':')
+      if (sep <= 0) throw new Error(`Invalid header line (expected "Name: Value"): ${line}`)
+      const key = line.slice(0, sep).trim()
+      const val = line.slice(sep + 1).trim()
+      if (!key || !val) throw new Error(`Invalid header line (expected "Name: Value"): ${line}`)
+      headers[key] = val
+    }
+    return headers
+  }
+
   function save() {
     const baseFields = { color, blurb, brief, reviewer }
     return run(async () => {
       if (editing.kind === 'builtin') {
         return { agent: await api.updateBuiltInAgent(editing.agent.id, baseFields, workspaceId) }
       }
+      const parsedHeaders = external ? parseHeaderLines(webhookHeadersText) : null
       if (editing.kind === 'custom') {
         const patch = external
           ? {
               ...baseFields,
               webhookUrl: webhookUrl.trim(),
+              webhookPayloadFormat,
               agentKeyId: agentKeyId || null,
               ...(webhookSecretInput.trim() ? { webhookSecret: webhookSecretInput.trim() } : {}),
+              ...(clearWebhookHeaders
+                ? { webhookHeaders: null }
+                : parsedHeaders
+                  ? { webhookHeaders: parsedHeaders }
+                  : {}),
             }
           : baseFields
         return { agent: await api.updateCustomAgent(editing.agent.id, patch, workspaceId) }
@@ -448,8 +479,10 @@ function AgentForm({
             ? {
                 external: true,
                 webhookUrl: webhookUrl.trim(),
+                webhookPayloadFormat,
                 agentKeyId: agentKeyId || null,
                 ...(webhookSecretInput.trim() ? { webhookSecret: webhookSecretInput.trim() } : {}),
+                ...(parsedHeaders ? { webhookHeaders: parsedHeaders } : {}),
               }
             : {}),
         },
@@ -644,6 +677,68 @@ function AgentForm({
                   placeholder={t('agents.webhookUrlPlaceholder')}
                   onChange={(e) => setWebhookUrl(e.target.value)}
                 />
+              </Field>
+              <Field
+                label={t('agents.webhookPayloadFormat')}
+                labelVariant="form"
+                htmlFor={`${ids}-payload-format`}
+                hint={t('agents.webhookPayloadFormatHint')}
+              >
+                <Select
+                  value={webhookPayloadFormat}
+                  onValueChange={(value) => setWebhookPayloadFormat(value === 'text' ? 'text' : 'doop')}
+                >
+                  <SelectTrigger id={`${ids}-payload-format`} size="sm" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="doop">{t('agents.webhookPayloadFormatDoop')}</SelectItem>
+                    <SelectItem value="text">{t('agents.webhookPayloadFormatText')}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field
+                label={t('agents.webhookHeaders')}
+                labelVariant="form"
+                htmlFor={`${ids}-webhook-headers`}
+                hint={
+                  clearWebhookHeaders
+                    ? t('agents.webhookHeadersCleared')
+                    : existingCustom?.webhookHeaderNames?.length
+                      ? t('agents.webhookHeadersConfigured', {
+                          names: existingCustom.webhookHeaderNames.join(', '),
+                        })
+                      : t('agents.webhookHeadersHint')
+                }
+              >
+                <div className="flex flex-col gap-2">
+                  <Textarea
+                    id={`${ids}-webhook-headers`}
+                    variant="well"
+                    className="min-h-[76px] font-mono text-caption"
+                    value={webhookHeadersText}
+                    placeholder={t('agents.webhookHeadersPlaceholder')}
+                    onChange={(e) => {
+                      setWebhookHeadersText(e.target.value)
+                      if (e.target.value.trim()) setClearWebhookHeaders(false)
+                    }}
+                  />
+                  {existingCustom?.webhookHeaderNames?.length ? (
+                    <div className="flex justify-end">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="bare"
+                        onClick={() => {
+                          setWebhookHeadersText('')
+                          setClearWebhookHeaders((v) => !v)
+                        }}
+                      >
+                        {t('agents.webhookHeadersClear')}
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
               </Field>
               <Field
                 label={t('agents.agentKey')}

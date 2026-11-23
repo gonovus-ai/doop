@@ -20,6 +20,16 @@ export const MAX_AGENT_BRIEF = 2000
 export const MAX_WEBHOOK_URL = 2000
 export const MIN_WEBHOOK_SECRET = 8
 export const MAX_WEBHOOK_SECRET = 256
+export const MAX_WEBHOOK_HEADERS = 20
+export const MAX_WEBHOOK_HEADER_NAME = 100
+export const MAX_WEBHOOK_HEADER_VALUE = 4096
+
+export const WEBHOOK_PAYLOAD_FORMATS = ['doop', 'text'] as const
+export type WebhookPayloadFormat = (typeof WEBHOOK_PAYLOAD_FORMATS)[number]
+
+/** RFC 7230 HTTP header token */
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+const FORBIDDEN_WEBHOOK_HEADERS = new Set(['host', 'content-length', 'transfer-encoding', 'connection'])
 
 /** a lowercase word: a letter, then letters and digits */
 const HANDLE = /^[a-z][a-z0-9]{1,23}$/
@@ -57,6 +67,10 @@ export interface CustomAgent extends AgentRole {
   hasWebhookSecret?: boolean
   /** returned ONCE on create or secret rotation; omitted everywhere else */
   webhookSecret?: string
+  /** names of configured custom HTTP headers (values are never returned on list/GET) */
+  webhookHeaderNames?: string[]
+  /** payload body shape: 'doop' (default JSON) or 'text' ({"text": "..."}) */
+  webhookPayloadFormat?: WebhookPayloadFormat
 }
 
 /** What the editor sends to create an agent. */
@@ -72,13 +86,24 @@ export interface CustomAgentInput {
   agentKeyId?: string | null
   webhookUrl?: string | null
   webhookSecret?: string | null
+  webhookHeaders?: Record<string, string> | null
+  webhookPayloadFormat?: WebhookPayloadFormat | null
 }
 
 /** What it sends to change one; the handle and the name stay. */
 export type CustomAgentPatch = Partial<
   Pick<
     CustomAgentInput,
-    'color' | 'blurb' | 'brief' | 'reviewer' | 'avatar' | 'agentKeyId' | 'webhookUrl' | 'webhookSecret'
+    | 'color'
+    | 'blurb'
+    | 'brief'
+    | 'reviewer'
+    | 'avatar'
+    | 'agentKeyId'
+    | 'webhookUrl'
+    | 'webhookSecret'
+    | 'webhookHeaders'
+    | 'webhookPayloadFormat'
   >
 >
 
@@ -199,6 +224,49 @@ function agentKeyIdOf(raw: unknown): Parsed<string | null> {
   return { ok: true, value: clean }
 }
 
+export function parseWebhookHeaders(raw: unknown): Parsed<Record<string, string> | null> {
+  if (raw === null || raw === undefined || raw === '') return { ok: true, value: null }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: 'webhook headers must be a JSON object of header names to string values' }
+  }
+  const entries = Object.entries(raw as Record<string, unknown>)
+  if (entries.length === 0) return { ok: true, value: null }
+  if (entries.length > MAX_WEBHOOK_HEADERS) {
+    return { ok: false, error: `keep custom webhook headers to ${MAX_WEBHOOK_HEADERS} or fewer` }
+  }
+  const out: Record<string, string> = {}
+  const seenLower = new Set<string>()
+  for (const [rawKey, rawVal] of entries) {
+    const name = rawKey.trim()
+    if (!name || name.length > MAX_WEBHOOK_HEADER_NAME || !HEADER_NAME.test(name)) {
+      return { ok: false, error: `invalid webhook header name: ${rawKey}` }
+    }
+    const lower = name.toLowerCase()
+    if (FORBIDDEN_WEBHOOK_HEADERS.has(lower)) {
+      return { ok: false, error: `header "${name}" cannot be overridden` }
+    }
+    if (seenLower.has(lower)) {
+      return { ok: false, error: `duplicate webhook header: ${name}` }
+    }
+    seenLower.add(lower)
+    if (typeof rawVal !== 'string') {
+      return { ok: false, error: `header "${name}" must have a string value` }
+    }
+    const val = rawVal.trim()
+    if (!val || val.length > MAX_WEBHOOK_HEADER_VALUE || CONTROL.test(val)) {
+      return { ok: false, error: `invalid value for webhook header "${name}"` }
+    }
+    out[name] = val
+  }
+  return { ok: true, value: out }
+}
+
+function webhookPayloadFormatOf(raw: unknown): Parsed<WebhookPayloadFormat> {
+  if (raw === null || raw === undefined || raw === '') return { ok: true, value: 'doop' }
+  if (raw === 'doop' || raw === 'text') return { ok: true, value: raw }
+  return { ok: false, error: 'webhook payload format must be "doop" or "text"' }
+}
+
 /** Check a new agent against the built-in team; the caller checks it against
  *  the custom agents already in its scope. */
 export function parseCustomAgentInput(raw: unknown): Parsed<CustomAgentInput> {
@@ -226,6 +294,12 @@ export function parseCustomAgentInput(raw: unknown): Parsed<CustomAgentInput> {
   if (!webhookUrl.ok) return webhookUrl
   const webhookSecret = external ? webhookSecretOf(input.webhookSecret) : { ok: true as const, value: null }
   if (!webhookSecret.ok) return webhookSecret
+  const webhookHeaders = external ? parseWebhookHeaders(input.webhookHeaders) : { ok: true as const, value: null }
+  if (!webhookHeaders.ok) return webhookHeaders
+  const webhookPayloadFormat = external
+    ? webhookPayloadFormatOf(input.webhookPayloadFormat)
+    : { ok: true as const, value: 'doop' as const }
+  if (!webhookPayloadFormat.ok) return webhookPayloadFormat
   return {
     ok: true,
     value: {
@@ -242,6 +316,8 @@ export function parseCustomAgentInput(raw: unknown): Parsed<CustomAgentInput> {
             ...(agentKeyId.value ? { agentKeyId: agentKeyId.value } : {}),
             ...(webhookUrl.value ? { webhookUrl: webhookUrl.value } : {}),
             ...(webhookSecret.value ? { webhookSecret: webhookSecret.value } : {}),
+            ...(webhookHeaders.value ? { webhookHeaders: webhookHeaders.value } : {}),
+            webhookPayloadFormat: webhookPayloadFormat.value,
           }
         : {
             ...(avatar.value ? { avatar: avatar.value } : {}),
@@ -302,6 +378,16 @@ export function parseCustomAgentPatch(raw: unknown, options?: { external?: boole
     const webhookSecret = webhookSecretOf(input.webhookSecret)
     if (!webhookSecret.ok) return webhookSecret
     if (webhookSecret.value) patch.webhookSecret = webhookSecret.value
+  }
+  if (external && 'webhookHeaders' in input) {
+    const webhookHeaders = parseWebhookHeaders(input.webhookHeaders)
+    if (!webhookHeaders.ok) return webhookHeaders
+    patch.webhookHeaders = webhookHeaders.value
+  }
+  if (external && 'webhookPayloadFormat' in input) {
+    const webhookPayloadFormat = webhookPayloadFormatOf(input.webhookPayloadFormat)
+    if (!webhookPayloadFormat.ok) return webhookPayloadFormat
+    patch.webhookPayloadFormat = webhookPayloadFormat.value
   }
   return { ok: true, value: patch }
 }

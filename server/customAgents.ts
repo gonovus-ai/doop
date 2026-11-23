@@ -5,12 +5,14 @@ import * as t from './db/schema.ts'
 import { AGENT_ROLES, type AgentRole, type Roster } from '../shared/agents.ts'
 import {
   MAX_CUSTOM_AGENTS,
+  parseWebhookHeaders,
   type AgentScope,
   type BuiltInAgent,
   type BuiltInAgentPatch,
   type CustomAgent,
   type CustomAgentInput,
   type CustomAgentPatch,
+  type WebhookPayloadFormat,
 } from '../shared/customAgents.ts'
 
 /**
@@ -40,6 +42,8 @@ export interface ExternalAgentRecord {
   agentKeyId: string | null
   webhookUrl: string | null
   webhookSecret: string | null
+  webhookHeaders: Record<string, string> | null
+  webhookPayloadFormat: WebhookPayloadFormat
 }
 
 const rows = new Map<string, AgentRow>()
@@ -56,6 +60,20 @@ function newWebhookSecret(): string {
   return `whsec_${nanoid(32)}`
 }
 
+function decodeHeaders(raw: string | null): Record<string, string> | null {
+  if (!raw) return null
+  try {
+    const parsed = parseWebhookHeaders(JSON.parse(raw))
+    return parsed.ok ? parsed.value : null
+  } catch {
+    return null
+  }
+}
+
+function formatOf(raw: string | null): WebhookPayloadFormat {
+  return raw === 'text' ? 'text' : 'doop'
+}
+
 function toExternalRecord(row: AgentRow): ExternalAgentRecord {
   return {
     id: row.id,
@@ -68,6 +86,8 @@ function toExternalRecord(row: AgentRow): ExternalAgentRecord {
     agentKeyId: row.agentKeyId,
     webhookUrl: row.webhookUrl,
     webhookSecret: row.webhookSecret,
+    webhookHeaders: decodeHeaders(row.webhookHeaders),
+    webhookPayloadFormat: formatOf(row.webhookPayloadFormat),
   }
 }
 
@@ -109,6 +129,8 @@ function scopeKey(scope: AgentScope, userId: string): string {
 }
 
 function toAgent(row: AgentRow): CustomAgent {
+  const headers = row.external ? decodeHeaders(row.webhookHeaders) : null
+  const headerNames = headers ? Object.keys(headers) : []
   return {
     id: row.handle,
     name: row.name,
@@ -121,6 +143,8 @@ function toAgent(row: AgentRow): CustomAgent {
     ...(row.external && row.agentKeyId ? { agentKeyId: row.agentKeyId } : {}),
     ...(row.external && row.webhookUrl ? { webhookUrl: row.webhookUrl } : {}),
     ...(row.external ? { hasWebhookSecret: !!row.webhookSecret } : {}),
+    ...(row.external && headerNames.length ? { webhookHeaderNames: headerNames } : {}),
+    ...(row.external ? { webhookPayloadFormat: formatOf(row.webhookPayloadFormat) } : {}),
     custom: true,
     createdAt: row.createdAt,
   }
@@ -277,6 +301,11 @@ export async function createCustomAgent(
       agentKeyId,
       webhookUrl: external ? (input.webhookUrl ?? null) : null,
       webhookSecret,
+      webhookHeaders:
+        external && input.webhookHeaders && Object.keys(input.webhookHeaders).length
+          ? JSON.stringify(input.webhookHeaders)
+          : null,
+      webhookPayloadFormat: external ? (input.webhookPayloadFormat ?? 'doop') : null,
       createdBy: userId,
       createdAt: now,
       updatedAt: now,
@@ -321,6 +350,16 @@ export async function updateCustomAgent(
       agentKeyId: nextAgentKeyId,
       webhookUrl: row.external && 'webhookUrl' in patch ? (patch.webhookUrl ?? null) : row.webhookUrl,
       webhookSecret: row.external && patch.webhookSecret ? patch.webhookSecret : row.webhookSecret,
+      webhookHeaders:
+        row.external && 'webhookHeaders' in patch
+          ? patch.webhookHeaders && Object.keys(patch.webhookHeaders).length
+            ? JSON.stringify(patch.webhookHeaders)
+            : null
+          : row.webhookHeaders,
+      webhookPayloadFormat:
+        row.external && 'webhookPayloadFormat' in patch
+          ? (patch.webhookPayloadFormat ?? 'doop')
+          : row.webhookPayloadFormat,
       updatedAt: Date.now(),
     }
     await db
@@ -334,6 +373,8 @@ export async function updateCustomAgent(
         agentKeyId: next.agentKeyId,
         webhookUrl: next.webhookUrl,
         webhookSecret: next.webhookSecret,
+        webhookHeaders: next.webhookHeaders,
+        webhookPayloadFormat: next.webhookPayloadFormat,
         updatedAt: next.updatedAt,
       })
       .where(eq(t.customAgents.id, row.id))

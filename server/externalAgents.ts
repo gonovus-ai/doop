@@ -162,6 +162,56 @@ function shouldRetry(result: WebhookDeliveryResult): boolean {
   return result.status >= 500 || result.status === 408 || result.status === 429
 }
 
+function formatTextPayload(payload: ExternalAgentPayload): string {
+  if (payload.type === 'agent.ping') {
+    return payload.text ?? `Ping from Doop to @${payload.agent.handle}`
+  }
+  const lines: string[] = [
+    `[Doop ${payload.type}] @${payload.agent.handle} (${payload.agent.name})`,
+    ...(payload.author ? [`From: ${payload.author.name}`] : []),
+    ...(payload.canvas_id
+      ? [
+          `Canvas: ${payload.canvas_name ?? payload.canvas_id} (${payload.canvas_id}) ${payload.canvas_url ?? ''}`.trim(),
+        ]
+      : []),
+    ...(payload.frame_id
+      ? [`Frame: ${payload.frame_name ?? payload.frame_id} (${payload.frame_id}) ${payload.frame_url ?? ''}`.trim()]
+      : []),
+    ...(payload.comment_id
+      ? [
+          `Comment: ${payload.comment_id} (thread: ${payload.thread_id ?? payload.comment_id}) ${payload.comment_url ?? ''}`.trim(),
+        ]
+      : []),
+    ...(payload.elementId ? [`Element: data-doop-id="${payload.elementId}"`] : []),
+    ...(payload.card_id
+      ? [`Card: ${payload.card_id} (stage ${(payload.stage ?? 0) + 1}/${payload.pipeline?.length ?? 1})`]
+      : []),
+    ...(payload.task_id
+      ? [`Task: ${payload.task_id}${payload.feedback_id ? ` (feedback: ${payload.feedback_id})` : ''}`]
+      : []),
+    ...(payload.text ? ['', `Request:\n${payload.text}`] : []),
+    ...(payload.snippet ? ['', `Element HTML snippet:\n${payload.snippet}`] : []),
+    '',
+    'Event JSON:',
+    JSON.stringify(payload),
+  ]
+  return lines.join('\n')
+}
+
+function mergeHeaders(base: Record<string, string>, custom: Record<string, string> | null): Record<string, string> {
+  if (!custom) return base
+  const out: Record<string, string> = { ...base }
+  const lowerToKey = new Map<string, string>()
+  for (const key of Object.keys(out)) lowerToKey.set(key.toLowerCase(), key)
+  for (const [name, value] of Object.entries(custom)) {
+    const existing = lowerToKey.get(name.toLowerCase())
+    if (existing && existing !== name) delete out[existing]
+    out[name] = value
+    lowerToKey.set(name.toLowerCase(), name)
+  }
+  return out
+}
+
 async function postOnce(agent: ExternalAgentRecord, payload: ExternalAgentPayload): Promise<WebhookDeliveryResult> {
   if (!agent.webhookUrl) {
     return { ok: false, status: null, error: 'no webhook URL configured' }
@@ -170,9 +220,12 @@ async function postOnce(agent: ExternalAgentRecord, payload: ExternalAgentPayloa
   if (problem) {
     return { ok: false, status: null, error: problem }
   }
-  const body = JSON.stringify(payload)
+  const body =
+    agent.webhookPayloadFormat === 'text'
+      ? JSON.stringify({ text: formatTextPayload(payload) })
+      : JSON.stringify(payload)
   const timestamp = Math.floor(Date.now() / 1000)
-  const headers: Record<string, string> = {
+  const baseHeaders: Record<string, string> = {
     'Content-Type': 'application/json',
     'User-Agent': USER_AGENT,
     'X-Doop-Event': payload.type,
@@ -180,8 +233,9 @@ async function postOnce(agent: ExternalAgentRecord, payload: ExternalAgentPayloa
     'X-Doop-Timestamp': String(timestamp),
   }
   if (agent.webhookSecret) {
-    headers['X-Doop-Signature'] = sign(agent.webhookSecret, timestamp, body)
+    baseHeaders['X-Doop-Signature'] = sign(agent.webhookSecret, timestamp, body)
   }
+  const headers = mergeHeaders(baseHeaders, agent.webhookHeaders)
   try {
     const res = await fetch(agent.webhookUrl, {
       method: 'POST',

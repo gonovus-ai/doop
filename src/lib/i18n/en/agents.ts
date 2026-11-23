@@ -86,4 +86,17 @@ export const agents = {
   copied: 'Copied',
   done: 'Done',
   briefOptional: 'Notes (optional)',
+  webhookPayloadFormat: 'Payload format',
+  webhookPayloadFormatDoop: 'Doop event JSON (default)',
+  webhookPayloadFormatText: 'Text wrapper — "text" field (Claude Code Routine)',
+  webhookPayloadFormatHint:
+    'Choose the text wrapper for endpoints like Anthropic Claude Code Routines that expect a JSON body with a single "text" prompt field.',
+  webhookHeaders: 'Custom HTTP headers (optional)',
+  webhookHeadersPlaceholder:
+    'Authorization: Bearer sk-...\nanthropic-beta: experimental-cc-routine-2026-04-01\nanthropic-version: 2023-06-01',
+  webhookHeadersHint:
+    'One Header: Value per line. Stored encrypted at rest; values are never shown again after saving.',
+  webhookHeadersConfigured: 'Configured headers: {names}. Leave blank to keep them, or enter new lines to replace.',
+  webhookHeadersClear: 'Clear headers',
+  webhookHeadersCleared: 'Custom headers will be cleared when you save.',
 } as const
