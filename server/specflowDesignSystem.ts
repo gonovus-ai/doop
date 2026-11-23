@@ -155,10 +155,52 @@ async function resolveAsset(subpath: string): Promise<CachedAsset | null> {
   if (parts.length >= 3) {
     const [dsName, versionOrLatest, ...rest] = parts
     const relPath = rest.join('/')
-    if (dsName && versionOrLatest && relPath && getRegisteredDesignSystem(dsName)) {
-      const reg = await readRegisteredAsset(dsName, versionOrLatest, relPath)
-      if (!reg) return null
-      return putInCache(subpath, buildCachedEntry(reg.buffer, reg.contentType, reg.compress, reg.isLatest, now))
+    if (dsName && versionOrLatest && relPath) {
+      const dsRow = getRegisteredDesignSystem(dsName)
+      // Dynamic runtime manifest endpoint used by `<doop-ds>` elements to load CSS/JS cleanly
+      if (relPath === 'manifest.json') {
+        if (dsRow) {
+          const isLatest = versionOrLatest === 'latest'
+          const rel = getRegisteredRelease(dsName, versionOrLatest)
+          if (!rel) return null
+          const manifest = isLatest ? dsRow.manifest : rel.manifest
+          const payload = Buffer.from(
+            JSON.stringify({
+              name: dsRow.name,
+              version: rel.version,
+              displayName: manifest.displayName || dsRow.displayName,
+              runtime: manifest.runtime,
+              components: manifest.components ?? [],
+            }),
+            'utf8',
+          )
+          const entry = buildCachedEntry(payload, 'application/json; charset=utf-8', true, isLatest, now)
+          if (isLatest) entry.cacheControl = 'no-cache'
+          return putInCache(subpath, entry)
+        }
+        if (dsName === 'specflow') {
+          const fallback = fallbackManifestFor('specflow')
+          const payload = Buffer.from(
+            JSON.stringify({
+              name: 'specflow',
+              version: versionOrLatest,
+              displayName: fallback.displayName,
+              runtime: fallback.runtime,
+              components: [],
+            }),
+            'utf8',
+          )
+          return putInCache(
+            subpath,
+            buildCachedEntry(payload, 'application/json; charset=utf-8', true, versionOrLatest === 'latest', now),
+          )
+        }
+      }
+      if (dsRow) {
+        const reg = await readRegisteredAsset(dsName, versionOrLatest, relPath)
+        if (!reg) return null
+        return putInCache(subpath, buildCachedEntry(reg.buffer, reg.contentType, reg.compress, reg.isLatest, now))
+      }
     }
   }
 

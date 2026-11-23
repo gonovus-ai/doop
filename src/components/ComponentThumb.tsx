@@ -31,12 +31,15 @@ export function ComponentThumb({
   sheetKey,
   load,
   height = 96,
+  allowScripts = false,
 }: {
   title: string
   sheetKey: string
   load: () => Promise<PreviewSheet>
   /** the well's height in px; the sheet is scaled down to fit inside it */
   height?: number
+  /** Enable sandbox="allow-scripts" for live hosted Design System (<doop-ds>) previews. */
+  allowScripts?: boolean
 }) {
   const [sheet, setSheet] = useState<({ key: string } & PreviewSheet) | null>(null)
   /* the panel is resizable, so the sheet scales to the card it is in */
@@ -79,7 +82,7 @@ export function ComponentThumb({
       {ready && (
         <iframe
           title={title}
-          sandbox=""
+          sandbox={allowScripts ? 'allow-scripts' : ''}
           srcDoc={sheet.html}
           tabIndex={-1}
           className="pointer-events-none absolute top-1/2 left-1/2 origin-center border-0 bg-surface"

@@ -15,10 +15,12 @@ import {
   DS_MAX_GUIDE_CHARS,
   DS_MAX_RELEASE_BYTES,
   mimeForDsFile,
+  normalizeComponentCatalog,
   resolveDesignSystemManifest,
   sanitizeDsFilePath,
   validateDsName,
   validateDsVersion,
+  type DesignSystemComponentDef,
   type DesignSystemDetail,
   type DesignSystemFileMeta,
   type DesignSystemManifest,
@@ -186,6 +188,16 @@ export function listDesignSystemsForUser(userId: string, workspaceId?: string): 
   return listDesignSystemsForWorkspaces(workspaces.workspaceIdsFor(userId))
 }
 
+/** Design systems available to a canvas: its workspace's, else the viewer's/owner's workspaces. */
+export function designSystemsForCanvas(
+  canvas: { workspaceId?: string | null; ownerId?: string | null },
+  viewerId?: string,
+): DesignSystemSummary[] {
+  if (canvas.workspaceId) return listDesignSystemsForWorkspaces([canvas.workspaceId])
+  const uid = viewerId || canvas.ownerId || undefined
+  return uid ? listDesignSystemsForWorkspaces(workspaces.workspaceIdsFor(uid)) : []
+}
+
 export function getDesignSystemDetailForUser(name: string, userId: string): DesignSystemDetail | null {
   const valid = validateDsName(name)
   if (!valid) return null
@@ -335,6 +347,11 @@ function validateManifestInput(manifest?: PartialManifestInput): void {
         throw new DesignSystemError(`invalid manifest asset path "${entry}"`, 400)
       }
     }
+  }
+  if (manifest.components !== undefined) {
+    const parsed = normalizeComponentCatalog(manifest.components)
+    if (!parsed.ok) throw new DesignSystemError(parsed.error, 400)
+    manifest.components = parsed.value
   }
 }
 
@@ -521,12 +538,23 @@ export async function rollbackDesignSystem(
 export async function updateDesignSystemMeta(
   rawName: string,
   userId: string | undefined,
-  patch: { displayName?: string; description?: string; guideMarkdown?: string },
+  patch: {
+    displayName?: string
+    description?: string
+    guideMarkdown?: string
+    components?: DesignSystemComponentDef[]
+  },
 ): Promise<DesignSystemSummary> {
   const name = validateDsName(rawName)
   if (!name) throw new DesignSystemError(`invalid design system name "${rawName}"`, 400)
   if (patch.guideMarkdown !== undefined && patch.guideMarkdown.length > DS_MAX_GUIDE_CHARS) {
     throw new DesignSystemError(`guide_markdown exceeds ${DS_MAX_GUIDE_CHARS} characters`, 400)
+  }
+  let normalizedComponents: DesignSystemComponentDef[] | undefined
+  if (patch.components !== undefined) {
+    const parsed = normalizeComponentCatalog(patch.components)
+    if (!parsed.ok) throw new DesignSystemError(parsed.error, 400)
+    normalizedComponents = parsed.value
   }
 
   return inDsOrder(name, async () => {
@@ -542,6 +570,7 @@ export async function updateDesignSystemMeta(
         ...existing.manifest.docs,
         ...(patch.guideMarkdown !== undefined ? { guideMarkdown: patch.guideMarkdown } : {}),
       },
+      ...(normalizedComponents !== undefined ? { components: normalizedComponents } : {}),
     }
     const now = Date.now()
     const nextRow: DsRow = {
@@ -563,9 +592,29 @@ export async function updateDesignSystemMeta(
       })
       .where(eq(t.designSystems.name, name))
     systems.set(name, nextRow)
+    // Also keep latest release's manifest in sync when updating catalog/guide so latest/manifest.json stays current
+    const latestRel = releasesBySystem.get(name)?.get(existing.latestVersion)
+    if (latestRel) {
+      const updatedRel: ReleaseRow = { ...latestRel, manifest: nextManifest }
+      await db
+        .update(t.designSystemReleases)
+        .set({ manifest: nextManifest })
+        .where(and(eq(t.designSystemReleases.name, name), eq(t.designSystemReleases.version, existing.latestVersion)))
+      releasesBySystem.get(name)?.set(existing.latestVersion, updatedRel)
+    }
     notifyChanged(name)
     return toSummary(nextRow)
   })
+}
+
+export async function updateDesignSystemCatalog(
+  rawName: string,
+  userId: string | undefined,
+  rawComponents: unknown,
+): Promise<DesignSystemSummary> {
+  const parsed = normalizeComponentCatalog(rawComponents)
+  if (!parsed.ok) throw new DesignSystemError(parsed.error, 400)
+  return updateDesignSystemMeta(rawName, userId, { components: parsed.value })
 }
 
 export async function deleteDesignSystemRelease(

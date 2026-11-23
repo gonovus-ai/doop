@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { BIND_ATTR, SLOT_ATTR, isDeleted, type ComponentProp } from '../../shared/components'
+import { buildDoopDsTag, defaultPropsForComponent, type DesignSystemPropDef } from '../../shared/designSystems'
 import type { Frame } from '../../shared/types'
 import { api } from '../lib/api'
 import {
@@ -10,21 +11,26 @@ import {
   templateValue,
   type ComponentContext,
 } from '../lib/components'
+import { doopDsContextOf, useCanvasDesignSystems, type DoopDsContext } from '../lib/designSystems'
 import { useT } from '../lib/i18n'
-import { isLayerLocked } from '../lib/layerEdits'
+import { isLayerLocked, replaceLayerHtml } from '../lib/layerEdits'
 import { canEditOpenCanvas, useStore } from '../lib/store'
 import { Button } from './ui/button'
 import { ComponentIcon, InstanceIcon } from './ui/icons'
 import { ImagePicker } from './ImageFill'
-import { PropertyRow, SelectField, TextField } from './ui/property-field'
+import { NumberField, PropertyRow, SelectField, TextField } from './ui/property-field'
 import { Switch } from './ui/switch'
 import { Textarea } from './ui/textarea'
 
-/** The Design panel's head when the selection belongs to a component. */
+/** The Design panel's head when the selection belongs to a component (canvas component or hosted `<doop-ds>`). */
 export function ComponentSection({ frame, selector }: { frame: Frame; selector: string }) {
   const t = useT()
   const defs = useStore((s) => s.canvas?.components)
+  const dsContext = useMemo(() => doopDsContextOf(frame.html, selector), [frame.html, selector])
   const context = useMemo(() => componentContextOf(frame.html, selector, defs ?? []), [frame.html, selector, defs])
+  if (dsContext) {
+    return <DoopDsSection frame={frame} context={dsContext} />
+  }
   if (!context) return null
   return (
     <section data-slot="component-section" className="flex flex-col border-b border-line-soft px-3 pt-3 pb-2.5">
@@ -256,5 +262,130 @@ function MainControls({ frame, context }: { frame: Frame; context: Extract<Compo
         </div>
       )}
     </div>
+  )
+}
+
+/** Right Inspector property controls for a hosted Design System `<doop-ds>` real React component. */
+function DoopDsSection({ frame, context }: { frame: Frame; context: DoopDsContext }) {
+  const canEdit = useStore(canEditOpenCanvas)
+  const locked = !canEdit || isLayerLocked(frame, context.rootSelector)
+  const { systems } = useCanvasDesignSystems(frame.canvasId)
+  const dsSummary = systems.find((s) => s.name === context.ds)
+  const compDef = dsSummary?.manifest.components?.find((c) => c.exportName === context.component)
+  const effectiveProps = { ...defaultPropsForComponent(compDef), ...context.props }
+
+  const commit = (patch: { props?: Record<string, unknown>; version?: string }) => {
+    const current = useStore.getState().canvas?.frames.find((f) => f.id === frame.id)
+    if (!current || isLayerLocked(current, context.rootSelector)) return
+    const nextTag = buildDoopDsTag({
+      ds: context.ds,
+      component: context.component,
+      version: patch.version ?? context.version,
+      props: patch.props ?? context.props,
+      extraAttrs: context.extraAttrs,
+    })
+    replaceLayerHtml(current, context.rootSelector, nextTag)
+  }
+
+  const updateProp = (name: string, value: unknown) => {
+    const nextProps = { ...effectiveProps, [name]: value }
+    commit({ props: nextProps })
+  }
+
+  const declaredProps: DesignSystemPropDef[] = compDef?.props ?? []
+  const declaredNames = new Set(declaredProps.map((p) => p.name))
+  const extraProps: DesignSystemPropDef[] = Object.entries(context.props)
+    .filter(([name]) => !declaredNames.has(name))
+    .flatMap(([name, value]): DesignSystemPropDef[] => {
+      if (typeof value === 'boolean') return [{ name, type: 'boolean' }]
+      if (typeof value === 'number') return [{ name, type: 'number' }]
+      if (typeof value === 'string') return [{ name, type: 'text' }]
+      return []
+    })
+  const allProps = [...declaredProps, ...extraProps]
+
+  const versionOptions = [
+    {
+      value: 'latest',
+      label: dsSummary ? `latest (v${dsSummary.latestVersion})` : 'latest',
+    },
+    ...(dsSummary?.versions ?? []).map((v) => ({ value: v, label: `v${v}` })),
+  ]
+  if (context.version !== 'latest' && !versionOptions.some((o) => o.value === context.version)) {
+    versionOptions.push({ value: context.version, label: `v${context.version}` })
+  }
+
+  return (
+    <section
+      data-slot="ds-component-section"
+      data-ds-component={`${context.ds}:${context.component}`}
+      className="flex flex-col border-b border-line-soft px-3 pt-3 pb-2.5"
+    >
+      <header className="mb-1 flex min-h-5 min-w-0 items-center gap-1.5 text-body font-medium text-ink">
+        <InstanceIcon size="rail" className="flex-none text-brand" data-component-icon="ds" />
+        <span className="truncate">{compDef?.displayName || context.component}</span>
+        <span className="ml-auto flex-none rounded-pill bg-paper-deep px-1.5 py-0.5 font-mono text-micro font-normal text-ink-soft">
+          {context.ds}
+        </span>
+      </header>
+      <PropertyRow label="Version">
+        <SelectField
+          label="Version"
+          value={context.version}
+          disabled={locked}
+          options={versionOptions}
+          onChange={(value) => commit({ version: value })}
+        />
+      </PropertyRow>
+      {allProps.map((prop) => {
+        const raw = effectiveProps[prop.name]
+        const label = prop.label || prop.name
+        return (
+          <PropertyRow key={`${context.rootSelector}:${prop.name}`} label={label}>
+            {prop.type === 'boolean' ? (
+              <Switch
+                size="sm"
+                className="my-auto"
+                disabled={locked}
+                checked={Boolean(raw)}
+                onCheckedChange={(checked) => updateProp(prop.name, checked)}
+                aria-label={label}
+              />
+            ) : prop.type === 'enum' ? (
+              <SelectField
+                label={label}
+                value={typeof raw === 'string' ? raw : (prop.options?.[0] ?? '')}
+                disabled={locked}
+                options={(prop.options ?? []).map((option) => ({ value: option, label: option }))}
+                onChange={(value) => updateProp(prop.name, value)}
+              />
+            ) : prop.type === 'number' ? (
+              <NumberField
+                label={label}
+                value={typeof raw === 'number' && Number.isFinite(raw) ? raw : null}
+                unit=""
+                min={-Infinity}
+                max={Infinity}
+                disabled={locked}
+                onCommit={(value) => updateProp(prop.name, value)}
+              />
+            ) : (
+              <TextField
+                label={label}
+                value={raw === undefined || raw === null ? '' : String(raw)}
+                disabled={locked}
+                className="font-sans"
+                onCommit={(value) => updateProp(prop.name, value)}
+              />
+            )}
+          </PropertyRow>
+        )
+      })}
+      {allProps.length === 0 && (
+        <p className="mt-1.5 text-caption text-ink-soft">
+          No editable props declared for {context.ds}:{context.component}.
+        </p>
+      )}
+    </section>
   )
 }

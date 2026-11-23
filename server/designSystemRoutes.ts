@@ -163,11 +163,13 @@ designSystemsRouter.patch('/:name', async (req: DsAuthedRequest, res) => {
       displayName?: string
       description?: string
       guideMarkdown?: string
+      components?: unknown
     }
     const summary = await updateDesignSystemMeta(String(req.params.name ?? ''), req.dsUserId!, {
       displayName: typeof body.displayName === 'string' ? body.displayName : undefined,
       description: typeof body.description === 'string' ? body.description : undefined,
       guideMarkdown: typeof body.guideMarkdown === 'string' ? body.guideMarkdown : undefined,
+      ...(body.components !== undefined ? { components: body.components as never } : {}),
     })
     res.json({ ok: true, designSystem: summary })
   } catch (err) {

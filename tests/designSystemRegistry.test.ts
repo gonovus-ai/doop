@@ -1,7 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Client, startServer, type Server } from './harness.ts'
 import { wrapDesignSystemJsxHtml } from '../server/specflowDesignSystem.ts'
-import { DS_MAX_FILE_BYTES, sanitizeDsFilePath, validateDsName, validateDsVersion } from '../shared/designSystems.ts'
+import {
+  buildDoopDsTag,
+  defaultPropsForComponent,
+  DS_MAX_FILE_BYTES,
+  parseDoopDsProps,
+  sanitizeDsFilePath,
+  validateDsName,
+  validateDsVersion,
+} from '../shared/designSystems.ts'
+import { buildDoopDsPreviewHtml } from '../shared/doopDsRuntime.ts'
 
 /**
  * End-to-end tests for Doop's Design System Registry against the REAL server:
@@ -334,5 +343,155 @@ describe('MCP tools end-to-end over /mcp', () => {
     expect(ticketCall.isError).toBe(false)
     expect(ticketCall.json.mode).toBe('ticket')
     expect(ticketCall.json.shell_command).toContain('/ds-upload/')
+  })
+
+  it('registers component catalog via set_design_system_catalog, serves manifest.json, lists & inserts <doop-ds> instances', async () => {
+    const catalogComponents = [
+      {
+        exportName: 'Button',
+        displayName: 'Button',
+        group: 'Actions',
+        description: 'Primary or secondary action button',
+        props: [
+          { name: 'variant', type: 'enum', options: ['primary', 'secondary', 'ghost'], default: 'primary' },
+          { name: 'disabled', type: 'boolean', default: false },
+          { name: 'children', type: 'text', default: 'Save' },
+        ],
+        previewSize: { width: 200, height: 64 },
+        sampleProps: { variant: 'primary', children: 'Save' },
+      },
+      {
+        exportName: 'Toggle',
+        displayName: 'Toggle Switch',
+        group: 'Inputs',
+        props: [
+          { name: 'checked', type: 'boolean', default: true },
+          { name: 'label', type: 'text', default: 'Auto sync' },
+        ],
+        sampleProps: { checked: true, label: 'Auto sync' },
+      },
+    ]
+
+    // Set component catalog via MCP
+    const catRes = await callMcpTool(ownerAgentKey, 'set_design_system_catalog', {
+      name: 'gonovus',
+      components: catalogComponents,
+    })
+    expect(catRes.isError).toBe(false)
+    expect(catRes.json.ok).toBe(true)
+    expect(catRes.json.component_count).toBe(2)
+
+    // Public manifest.json reflects the catalog & runtime with no-cache on latest and immutable on pinned
+    const latestManifestRes = await fetch(`${server.base}/ds/gonovus/latest/manifest.json`)
+    expect(latestManifestRes.status).toBe(200)
+    expect(latestManifestRes.headers.get('cache-control')).toBe('no-cache')
+    const latestManifest = (await latestManifestRes.json()) as {
+      name: string
+      version: string
+      runtime: { preset: string; globalName: string; stylesheets: string[]; scripts: string[] }
+      components: Array<{ exportName: string; group?: string }>
+    }
+    expect(latestManifest.name).toBe('gonovus')
+    expect(latestManifest.version).toBe('0.3.0')
+    expect(latestManifest.runtime.preset).toBe('react-18-umd')
+    expect(latestManifest.runtime.globalName).toBe('GoNovusA')
+    expect(latestManifest.components.map((c) => c.exportName)).toEqual(['Button', 'Toggle'])
+
+    const pinnedManifestRes = await fetch(`${server.base}/ds/gonovus/0.3.0/manifest.json`)
+    expect(pinnedManifestRes.status).toBe(200)
+    expect(pinnedManifestRes.headers.get('cache-control')).toContain('immutable')
+
+    // Create a workspace canvas + HTML frame
+    const canvasRes = await owner.post('/api/canvases', { name: 'DS Panel Test', workspaceId })
+    expect(canvasRes.status).toBe(200)
+    const canvas = (await canvasRes.json()) as { id: string }
+
+    const frameRes = await owner.post(`/api/canvases/${canvas.id}/frames`, {
+      name: 'Screen 1',
+      html: '<!doctype html><html><head></head><body><main id="root"></main></body></html>',
+    })
+    expect(frameRes.status).toBe(200)
+    const frame = (await frameRes.json()) as { id: string }
+
+    // Canvas design systems endpoint returns gonovus with its component catalog
+    const canvasDsRes = await owner.get(`/api/canvases/${canvas.id}/design-systems`)
+    expect(canvasDsRes.status).toBe(200)
+    const canvasDs = (await canvasDsRes.json()) as Array<{
+      name: string
+      manifest: { components?: Array<{ exportName: string }> }
+    }>
+    expect(canvasDs.some((d) => d.name === 'gonovus' && d.manifest.components?.length === 2)).toBe(true)
+
+    // MCP list_components exposes hosted DS components with ready-to-paste <doop-ds> usage
+    const listAll = await callMcpTool(ownerAgentKey, 'list_components', {
+      canvas_id: canvas.id,
+      agent_name: 'Tester',
+    })
+    expect(listAll.isError).toBe(false)
+    expect(listAll.json.design_systems[0].name).toBe('gonovus')
+    expect(listAll.json.design_systems[0].components).toHaveLength(2)
+    expect(listAll.json.design_systems[0].components[0].usage).toContain('<doop-ds ds="gonovus" component="Button"')
+
+    const listFiltered = await callMcpTool(ownerAgentKey, 'list_components', {
+      canvas_id: canvas.id,
+      query: 'Toggle',
+      agent_name: 'Tester',
+    })
+    expect(listFiltered.isError).toBe(false)
+    expect(listFiltered.json.design_systems[0].components).toHaveLength(1)
+    expect(listFiltered.json.design_systems[0].components[0].export_name).toBe('Toggle')
+
+    // MCP insert_instance inserts a real <doop-ds> tag with typed props (both explicit ds and shorthand ds:Component)
+    const insBtn = await callMcpTool(ownerAgentKey, 'insert_instance', {
+      canvas_id: canvas.id,
+      frame_id: frame.id,
+      ds: 'gonovus',
+      component: 'Button',
+      props: { variant: 'secondary', children: 'Publish' },
+      agent_name: 'Tester',
+    })
+    expect(insBtn.isError).toBe(false)
+    expect(insBtn.json.ok).toBe(true)
+    expect(insBtn.json.instance_id).toBeTruthy()
+
+    const insToggle = await callMcpTool(ownerAgentKey, 'insert_instance', {
+      canvas_id: canvas.id,
+      frame_id: frame.id,
+      component: 'gonovus:Toggle',
+      version: '0.3.0',
+      props: { checked: false },
+      agent_name: 'Tester',
+    })
+    expect(insToggle.isError).toBe(false)
+    expect(insToggle.json.ok).toBe(true)
+
+    // Verify frame HTML carries clean <doop-ds> tags with JSON props & pinned version
+    const updatedCanvasRes = await owner.get(`/api/canvases/${canvas.id}`)
+    const updatedCanvas = (await updatedCanvasRes.json()) as { frames: Array<{ id: string; html: string }> }
+    const updatedFrame = updatedCanvas.frames.find((f) => f.id === frame.id)!
+    expect(updatedFrame.html).toContain('<doop-ds ds="gonovus" component="Button"')
+    expect(updatedFrame.html).toContain('"variant":"secondary"')
+    expect(updatedFrame.html).toContain('"children":"Publish"')
+    expect(updatedFrame.html).toContain('<doop-ds ds="gonovus" component="Toggle" version="0.3.0"')
+    expect(updatedFrame.html).toContain('"checked":false')
+
+    // Verify shared tag/preview helpers
+    const tag = buildDoopDsTag({
+      ds: 'gonovus',
+      component: 'Button',
+      props: defaultPropsForComponent(catalogComponents[0] as never),
+    })
+    expect(tag).toContain('ds="gonovus"')
+    expect(parseDoopDsProps('{"checked":true,"count":3}')).toEqual({ checked: true, count: 3 })
+    const previewHtml = buildDoopDsPreviewHtml({
+      origin: server.base,
+      ds: 'gonovus',
+      component: 'Button',
+      props: { children: 'Save' },
+      width: 200,
+      height: 64,
+    })
+    expect(previewHtml).toContain('<doop-ds ds="gonovus" component="Button"')
+    expect(previewHtml).toContain('window.__doopDsOrigin=')
   })
 })

@@ -1,3 +1,4 @@
+import { DOOP_DS_RUNTIME_SCRIPT } from '../../shared/doopDsRuntime'
 import { FRAME_REPLAY_RUNTIME } from './frameReplayRuntime'
 import { FRAME_DROP_RUNTIME } from './frameDropRuntime'
 import { FRAME_PROTO_RUNTIME } from './frameProtoRuntime'
@@ -17,6 +18,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   ${FRAME_REPLAY_RUNTIME}
   ${FRAME_DROP_RUNTIME}
   ${FRAME_PROTO_RUNTIME}
+  ${DOOP_DS_RUNTIME_SCRIPT}
+  var dsOrigin = ''
   /* horizontal overscroll inside a frame must not chain to the parent page,
      where the browser turns it into a history back/forward swipe. A frame
      is an artboard, so it never wears a scrollbar either (its content still
@@ -183,11 +186,21 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 
   function morphChildren(from, to) {
     var tc = to.childNodes
+    var fromKids = []
+    var firstDsAsset = null
+    for (var k = 0; k < from.childNodes.length; k++) {
+      var cn = from.childNodes[k]
+      if (cn.nodeType === 1 && cn.hasAttribute('data-doop-ds-asset')) {
+        if (!firstDsAsset) firstDsAsset = cn
+        continue
+      }
+      fromKids.push(cn)
+    }
     for (var i = 0; i < tc.length; i++) {
       var t = tc[i]
-      var f = from.childNodes[i]
+      var f = fromKids[i]
       if (!f) {
-        from.appendChild(document.importNode(t, true))
+        from.insertBefore(document.importNode(t, true), firstDsAsset)
         continue
       }
       if (f.nodeType !== t.nodeType || (f.nodeType === 1 && f.nodeName !== t.nodeName)) {
@@ -205,6 +218,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
             f.textContent = t.textContent
             f.removeAttribute('data-v-ran') // changed script: re-execute
           }
+        } else if (f.nodeName === 'DOOP-DS') {
+          /* React owns the mounted subtree inside <doop-ds>; attributes were synced above. */
         } else if (isOpaque(f)) {
           if (f.innerHTML !== t.innerHTML) f.innerHTML = t.innerHTML
         } else {
@@ -212,7 +227,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
         }
       }
     }
-    while (from.childNodes.length > tc.length) from.removeChild(from.lastChild)
+    for (var r = fromKids.length - 1; r >= tc.length; r--) from.removeChild(fromKids[r])
   }
 
   /* cloned/imported script nodes never execute — swap in fresh ones */
@@ -249,6 +264,10 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       morphChildren(document.head, doc.head)
       morphChildren(document.body, doc.body)
       activateScripts()
+      if (window.__doopSyncDs) {
+        var dsPromise = window.__doopSyncDs(dsOrigin)
+        if (dsPromise && dsPromise.then) dsPromise.then(notifyFrameUpdated, notifyFrameUpdated)
+      }
       syncPathVisibility()
     } catch (e) {
       if (doc) document.documentElement.innerHTML = doc.documentElement.innerHTML
@@ -433,6 +452,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     }
     root.querySelectorAll('[data-v-path-hidden]').forEach(function (el) { el.removeAttribute('data-v-path-hidden') })
     root.querySelectorAll('[data-v-proto-flash]').forEach(function (el) { el.removeAttribute('data-v-proto-flash') })
+    root.querySelectorAll('[data-doop-ds-asset]').forEach(function (el) { el.remove() })
+    root.querySelectorAll('doop-ds').forEach(function (el) { el.innerHTML = '' })
     root.style.removeProperty('zoom') // crisp-render zoom is ours, not the design's
     if (!root.getAttribute('style')) root.removeAttribute('style')
     return root
@@ -1155,6 +1176,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     for (var i = 0; i < stack.length; i++) {
       var el = stack[i]
       if (el === document.documentElement || el === document.body) return null
+      var dsHost = el.closest && el.closest('doop-ds')
+      if (dsHost) el = dsHost
       if (root && root.contains(el)) el = root
       if (!isLocked(el)) return el
     }
@@ -1185,7 +1208,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
 
   function probeTarget(x, y, grouped, selected, deeper) {
     var el = elementAt(x, y, selected)
-    if (el) el = el.closest('[data-doop-drawing]:not([data-doop-drawing="group"])') || el
+    if (el) el = el.closest('doop-ds') || el.closest('[data-doop-drawing]:not([data-doop-drawing="group"])') || el
     return el && grouped ? groupLevel(el, selected, deeper) : el
   }
 
@@ -1209,7 +1232,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
   function contextHit(x, y) {
     var el = document.elementFromPoint(viewX(x), viewX(y))
     if (!el || el === document.body || el === document.documentElement) return null
-    el = el.closest('[data-doop-locked]') || el.closest('[data-doop-drawing]') || el.closest('svg') || el
+    el = el.closest('[data-doop-locked]') || el.closest('doop-ds') || el.closest('[data-doop-drawing]') || el.closest('svg') || el
     return hitInfo(el)
   }
 
@@ -2105,6 +2128,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       parent.postMessage({ type: 'doop:style-gesture-result', reqId: d.reqId, info: changed ? inspect(d.selector) : null }, '*')
     }
     if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) {
+      if (typeof d.origin === 'string' && d.origin) dsOrigin = d.origin
       render(d.html)
       notifyFrameUpdated()
       protoHtmlChanged()

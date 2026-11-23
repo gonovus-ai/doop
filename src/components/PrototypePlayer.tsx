@@ -702,7 +702,11 @@ function ProtoScreen({
 
   const html = frame?.html ?? ''
   useEffect(() => {
-    if (booted) iframeRef.current?.contentWindow?.postMessage({ type: 'doop:html', html, reqId: 'proto' }, '*')
+    if (booted)
+      iframeRef.current?.contentWindow?.postMessage(
+        { type: 'doop:html', html, origin: window.location.origin, reqId: 'proto' },
+        '*',
+      )
   }, [booted, html])
 
   useEffect(() => {

@@ -25,7 +25,9 @@ import {
   type LibraryComponent,
   type PartOverride,
 } from '../shared/components.ts'
-import { ELEMENT_ID_ATTR } from '../shared/elementId.ts'
+import { ELEMENT_ID_ATTR, newElementId } from '../shared/elementId.ts'
+import { buildDoopDsTag, defaultPropsForComponent, validateDsName, validateDsVersion } from '../shared/designSystems.ts'
+import { getRegisteredDesignSystem } from './designSystemRegistry.ts'
 import type { Actor, Canvas, Frame } from '../shared/types.ts'
 import { decodeQuotes, familyKey, fontFaceRule, usesFamily, type CustomFont } from '../shared/fonts.ts'
 import { fontsForCanvas } from './fonts.ts'
@@ -893,15 +895,40 @@ export type InstancePosition = 'append' | 'prepend' | 'before' | 'after'
 export interface InsertInput {
   frameId: string
   component: string
-  props?: Record<string, string>
+  /** Optional hosted Design System slug (e.g. "gonovus") to place a real React <doop-ds> component. */
+  ds?: string
+  /** Optional pinned Design System version; omit or "latest" to auto-track the latest release. */
+  version?: string
+  props?: Record<string, unknown>
   /** inside or beside this element (a data-doop-id or selector); the page body when unset */
   target?: string
   position?: InstancePosition
 }
 
-function useFor(def: ComponentDef, props: Record<string, string> | undefined, instanceId = ''): string {
-  const state = { instanceId, componentId: def.id, rev: def.rev, overrides: props ? { props } : {} }
+function useFor(def: ComponentDef, props: Record<string, unknown> | undefined, instanceId = ''): string {
+  let stringProps: Record<string, string> | undefined
+  if (props) {
+    stringProps = {}
+    for (const [k, v] of Object.entries(props)) {
+      if (v !== undefined && v !== null) stringProps[k] = String(v)
+    }
+  }
+  const state = { instanceId, componentId: def.id, rev: def.rev, overrides: stringProps ? { props: stringProps } : {} }
   return useMarkup(def.name, state, def, undefined)
+}
+
+function resolveDsInsertTarget(input: InsertInput): { dsName: string; componentName: string } | null {
+  if (input.ds && input.ds.trim()) {
+    return { dsName: input.ds.trim(), componentName: input.component.trim() }
+  }
+  const colon = input.component.indexOf(':')
+  if (colon > 0) {
+    const maybeDs = validateDsName(input.component.slice(0, colon))
+    if (maybeDs && getRegisteredDesignSystem(maybeDs)) {
+      return { dsName: maybeDs, componentName: input.component.slice(colon + 1).trim() }
+    }
+  }
+  return null
 }
 
 export const insertInstance = atomic(function insertInstance(
@@ -909,10 +936,49 @@ export const insertInstance = atomic(function insertInstance(
   input: InsertInput,
   actor: Actor,
 ): { frame: Frame; instanceId: string } {
-  const def = requireComponent(canvasId, input.component)
   const frame = requireFrame(canvasId, input.frameId)
-  const markup = useFor(def, input.props)
   const position = input.position ?? 'append'
+  const dsTarget = resolveDsInsertTarget(input)
+  if (dsTarget) {
+    const validDs = validateDsName(dsTarget.dsName)
+    const dsRow = validDs ? getRegisteredDesignSystem(validDs) : undefined
+    if (!dsRow) fail(`design system “${dsTarget.dsName}” is not registered on this server`)
+    if (!dsTarget.componentName) fail('component name is required')
+    let version: string | undefined
+    if (input.version && input.version.trim() && input.version.trim().toLowerCase() !== 'latest') {
+      const validVer = validateDsVersion(input.version)
+      if (!validVer) fail(`invalid design system version “${input.version}”`)
+      version = validVer
+    }
+    const catalogList = dsRow.manifest.components ?? []
+    const catalogDef =
+      catalogList.find((c) => c.exportName === dsTarget.componentName) ??
+      catalogList.find(
+        (c) =>
+          c.exportName.toLowerCase() === dsTarget.componentName.toLowerCase() ||
+          (c.displayName ?? '').toLowerCase() === dsTarget.componentName.toLowerCase(),
+      )
+    const exportName = catalogDef?.exportName ?? dsTarget.componentName
+    const mergedProps: Record<string, unknown> = {
+      ...defaultPropsForComponent(catalogDef),
+      ...(input.props ?? {}),
+    }
+    const instanceId = newElementId()
+    const markup = buildDoopDsTag({
+      ds: dsRow.name,
+      component: exportName,
+      version,
+      props: mergedProps,
+      extraAttrs: { [ELEMENT_ID_ATTR]: instanceId },
+    })
+    const html = insertAt(frame.html, markup, input.target, position)
+    const next = actions.updateFrame(frame.id, { html }, actor)
+    if (!next) fail('frame not found')
+    return { frame: next, instanceId }
+  }
+
+  const def = requireComponent(canvasId, input.component)
+  const markup = useFor(def, input.props)
   const html = insertAt(frame.html, markup, input.target, position)
   const before = new Set(instanceIds(frame.html))
   const next = actions.updateFrame(frame.id, { html }, actor)

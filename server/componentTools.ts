@@ -32,6 +32,8 @@ import {
   waitingLibraryUpdates,
 } from './componentActions.ts'
 import { isLibrary, librariesForCanvas } from './componentLibrary.ts'
+import { designSystemsForCanvas } from './designSystemRegistry.ts'
+import { buildDoopDsTag, defaultPropsForComponent } from '../shared/designSystems.ts'
 import * as actions from './actions.ts'
 import { componentReuseNotes, componentSystemNotes, frameReuseNotes } from './reuseNotes.ts'
 import { store } from './store.ts'
@@ -155,13 +157,13 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
     name: 'list_components',
     title: 'List components',
     description:
-      "List the reusable components on a canvas: each name, its props and slots as a one-line signature, a ready-to-paste <doop-use> and how often it is used. Check this BEFORE writing markup: anything on this list must be used through <doop-use>, never redrawn. workspace_libraries lists what the canvas's workspace has published and this canvas does not use yet: write <doop-use> with that name and it is added, linked to its library. With libraries=true, also lists components on other canvases this account can read, ready for import_component.",
+      'List the reusable components on a canvas: each name, its props and slots as a one-line signature, a ready-to-paste <doop-use> and how often it is used. Also lists real React components from hosted Design Systems under design_systems (usable via <doop-ds ds="…" component="…" props=\'…\'></doop-ds> or insert_instance). Check this BEFORE writing markup: anything on this list must be used through <doop-use> or <doop-ds>, never redrawn. workspace_libraries lists what the canvas\'s workspace has published and this canvas does not use yet: write <doop-use> with that name and it is added, linked to its library. With libraries=true, also lists components on other canvases this account can read, ready for import_component.',
     readOnly: true,
     shape: {
       query: z.string().optional().describe('Only components whose name or description contains this'),
       libraries: z.boolean().optional().describe('Also list importable components from other canvases'),
     },
-    run({ query, libraries }, { canvas, readableCanvases }) {
+    run({ query, libraries }, { canvas, readableCanvases, userId }) {
       const wanted = typeof query === 'string' ? query.toLowerCase() : ''
       const matches = (def: ComponentDef) =>
         !wanted || def.name.toLowerCase().includes(wanted) || def.description.toLowerCase().includes(wanted)
@@ -177,9 +179,42 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
           ),
         }))
         .filter((library) => library.components.length)
+      const designSystems = designSystemsForCanvas(canvas, userId)
+        .map((ds) => {
+          const matching = (ds.manifest.components ?? []).filter(
+            (comp) =>
+              !wanted ||
+              ds.name.toLowerCase().includes(wanted) ||
+              comp.exportName.toLowerCase().includes(wanted) ||
+              (comp.displayName ?? '').toLowerCase().includes(wanted) ||
+              (comp.group ?? '').toLowerCase().includes(wanted) ||
+              (comp.description ?? '').toLowerCase().includes(wanted),
+          )
+          return {
+            name: ds.name,
+            display_name: ds.displayName,
+            latest_version: ds.latestVersion,
+            global_name: ds.manifest.runtime.globalName,
+            components: matching.map((comp) => ({
+              export_name: comp.exportName,
+              ...(comp.displayName ? { display_name: comp.displayName } : {}),
+              ...(comp.group ? { group: comp.group } : {}),
+              ...(comp.description ? { description: comp.description } : {}),
+              ...(comp.props?.length ? { props: comp.props } : {}),
+              ...(comp.sampleProps ? { sample_props: comp.sampleProps } : {}),
+              usage: buildDoopDsTag({
+                ds: ds.name,
+                component: comp.exportName,
+                props: defaultPropsForComponent(comp),
+              }),
+            })),
+          }
+        })
+        .filter((ds) => ds.components.length > 0)
       return {
         data: {
           components,
+          ...(designSystems.length ? { design_systems: designSystems } : {}),
           ...(shared.length ? { workspace_libraries: shared } : {}),
           ...(libraries
             ? {
@@ -192,7 +227,7 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
                   })),
               }
             : {}),
-          ...(components.length || shared.length
+          ...(components.length || shared.length || designSystems.length
             ? {}
             : {
                 note: 'No components match. If a block repeats, make it one with create_component.',
@@ -459,12 +494,23 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
   {
     name: 'insert_instance',
     title: 'Place a component',
-    description: `Place one instance of a component into a frame, inside or beside an element, and get back its instance_id. When you are already writing the frame's HTML, write <${USE_TAG}> in it instead.`,
+    description: `Place one instance of a canvas component (<${USE_TAG}>) or a hosted Design System React component (<doop-ds>, pass ds="gonovus" or component="gonovus:Button") into a frame, inside or beside an element, and get back its instance_id. When you are already writing the frame's HTML, write <${USE_TAG}> or <doop-ds> in it instead.`,
     readOnly: false,
     shape: {
       frame_id: FRAME_ID,
-      component: COMPONENT_REF,
-      props: z.record(z.string()).optional().describe('Prop values, e.g. { "label": "Sign up", "tone": "ghost" }'),
+      component: COMPONENT_REF.describe('Canvas component name/id, or DS exportName (optionally "ds:ExportName")'),
+      ds: z
+        .string()
+        .optional()
+        .describe('Hosted Design System slug (e.g. "gonovus") to insert an interactive <doop-ds> React component'),
+      version: z
+        .string()
+        .optional()
+        .describe('Optional DS version to pin on <doop-ds> (omit or "latest" to auto-track latest)'),
+      props: z
+        .record(z.unknown())
+        .optional()
+        .describe('Prop values, e.g. { "variant": "primary", "children": "Save", "checked": true }'),
       target: z.string().optional().describe('A data-doop-id. Defaults to the page body'),
       position: z
         .enum(['append', 'prepend', 'before', 'after'])
@@ -472,12 +518,18 @@ export const COMPONENT_TOOLS: ComponentTool[] = [
         .describe('Relative to target; default append'),
     },
     run(input, { canvas, actor }) {
+      const rawProps =
+        input.props && typeof input.props === 'object' && !Array.isArray(input.props)
+          ? (input.props as Record<string, unknown>)
+          : undefined
       const { frame, instanceId } = insertInstance(
         canvas.id,
         {
           frameId: String(input.frame_id),
           component: String(input.component),
-          props: asProps(input.props),
+          ds: typeof input.ds === 'string' ? input.ds : undefined,
+          version: typeof input.version === 'string' ? input.version : undefined,
+          props: rawProps ?? asProps(input.props),
           target: input.target as string | undefined,
           position: input.position as never,
         },

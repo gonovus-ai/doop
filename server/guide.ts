@@ -823,7 +823,16 @@ When authoring raw HTML with \`create_frame\`, load resources in this exact orde
   \`document.cookie\`, or \`history.pushState\`.
 - Inspect available tokens or live docs anytime via \`get_design_system({ ds_name: "gonovus", section: "overview" | "tokens" | "guide" })\`.
 
-## 5. Publishing new GoNovus versions (zero Doop redeploy)
+## 5. Declarative real components in HTML frames (\`<doop-ds>\`) & Components Panel
+You can place live, interactive GoNovus React components inside any ordinary HTML frame using:
+\`\`\`html
+<doop-ds ds="gonovus" component="Button" props='{"variant":"primary","children":"Save"}'></doop-ds>
+\`\`\`
+- Optional \`version="0.1.0"\` pins a release; omitting it tracks \`latest\` automatically when new versions publish.
+- The frame runtime automatically loads \`tokens.css\`, \`bundle.css\`, React 18 UMD, and \`bundle.js\` once per frame and wires \`window.__doopReady\` for screenshots.
+- Register or update the component catalog (which populates the Components panel, Inspector controls, and \`list_components\`) via \`set_design_system_catalog\` or \`manifest.components\` in \`publish_design_system_bundle\`.
+
+## 6. Publishing new GoNovus versions (zero Doop redeploy)
 Workspace members can publish new versions via \`publish_design_system_bundle\`:
 - For bundles on local disk (especially \`bundle.js\` > 100KB), call
   \`publish_design_system_bundle({ name: "gonovus", version: "0.2.0", upload_mode: "ticket", files: [{ path: "tokens.css" }, { path: "components/bundle.css" }, { path: "components/bundle.js" }] })\`

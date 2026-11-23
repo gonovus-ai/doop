@@ -807,12 +807,21 @@ export const api = {
     }),
   insertInstance: (
     frameId: string,
-    body: { component: string; props?: Record<string, string>; target?: string; position?: string },
+    body: {
+      component: string
+      ds?: string
+      version?: string
+      props?: Record<string, unknown>
+      target?: string
+      position?: string
+    },
   ) =>
     req<{ frame: Frame; instanceId: string }>(`/api/frames/${frameId}/instances`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  canvasDesignSystems: (canvasId: string) =>
+    req<DesignSystemSummary[]>(`/api/canvases/${encodeURIComponent(canvasId)}/design-systems`),
   changeInstances: (frameId: string, changes: InstanceChangeInput[]) =>
     req<{ frame: Frame; missing: string[] }>(`/api/frames/${frameId}/instances`, {
       method: 'PATCH',

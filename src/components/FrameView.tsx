@@ -1064,7 +1064,7 @@ export const FrameView = memo(function FrameView({
     const request = ++htmlRequest.current
     noteFrameDocument(frame.id, null)
     let cancelled = false
-    void requestFrame(frame.id, 'doop:html', { html }).then((reply) => {
+    void requestFrame(frame.id, 'doop:html', { html, origin: window.location.origin }).then((reply) => {
       if (!reply || request !== htmlRequest.current) return
       /* the runtime shows it whether or not this effect is still current */
       noteFrameDocument(frame.id, html)

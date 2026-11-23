@@ -14,6 +14,32 @@ export const DS_MAX_FILE_BYTES = 5 * 1024 * 1024 // 5 MB per file (>= 2 MB requi
 export const DS_MAX_RELEASE_BYTES = 30 * 1024 * 1024 // 30 MB per release
 export const DS_MAX_FILES_PER_RELEASE = 128
 export const DS_MAX_GUIDE_CHARS = 32_000
+export const DS_MAX_CATALOG_COMPONENTS = 256
+export const DS_MAX_PROPS_PER_COMPONENT = 48
+
+export type DsPropType = 'enum' | 'text' | 'boolean' | 'number'
+
+export interface DesignSystemPropDef {
+  name: string
+  type: DsPropType
+  options?: string[]
+  default?: string | boolean | number
+  label?: string
+  description?: string
+}
+
+export interface DesignSystemComponentDef {
+  /** Export name on window.<globalName>, e.g. "Button" or "Card.Header". */
+  exportName: string
+  /** Display label shown in the Components panel (defaults to exportName). */
+  displayName?: string
+  /** Optional category/group in the Components panel, e.g. "Actions" or "Inputs". */
+  group?: string
+  description?: string
+  props?: DesignSystemPropDef[]
+  previewSize?: { width?: number; height?: number }
+  sampleProps?: Record<string, unknown>
+}
 
 export type DesignSystemRuntimePreset = 'react-18-umd' | 'react-19-bundle' | 'none'
 
@@ -51,6 +77,8 @@ export interface DesignSystemManifest {
   description?: string
   runtime: DesignSystemRuntimeConfig
   docs?: DesignSystemDocsConfig
+  /** Declared interactive components surfaced in the Components panel, Inspector, and MCP list_components. */
+  components?: DesignSystemComponentDef[]
 }
 
 export interface DesignSystemFileMeta {
@@ -166,6 +194,186 @@ export interface PartialManifestInput {
   description?: string
   runtime?: Partial<DesignSystemRuntimeConfig>
   docs?: Partial<DesignSystemDocsConfig>
+  components?: DesignSystemComponentDef[]
+}
+
+const EXPORT_NAME_RE = /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/
+const PROP_NAME_RE = /^[A-Za-z_$][A-Za-z0-9_$-]{0,63}$/
+
+export function normalizeComponentCatalog(
+  raw: unknown,
+): { ok: true; value: DesignSystemComponentDef[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw)) return { ok: false, error: 'components must be an array' }
+  if (raw.length > DS_MAX_CATALOG_COMPONENTS) {
+    return { ok: false, error: `at most ${DS_MAX_CATALOG_COMPONENTS} components allowed in catalog` }
+  }
+  const seen = new Set<string>()
+  const result: DesignSystemComponentDef[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') return { ok: false, error: 'each component entry must be an object' }
+    const obj = item as Record<string, unknown>
+    const exportName = String(obj.exportName ?? obj.export_name ?? obj.name ?? '').trim()
+    if (!EXPORT_NAME_RE.test(exportName)) {
+      return { ok: false, error: `invalid component exportName "${exportName}"` }
+    }
+    if (seen.has(exportName)) {
+      return { ok: false, error: `duplicate component exportName "${exportName}"` }
+    }
+    seen.add(exportName)
+
+    const displayName =
+      typeof obj.displayName === 'string' && obj.displayName.trim()
+        ? obj.displayName.trim()
+        : typeof obj.display_name === 'string' && obj.display_name.trim()
+          ? obj.display_name.trim()
+          : undefined
+    const group = typeof obj.group === 'string' && obj.group.trim() ? obj.group.trim() : undefined
+    const description =
+      typeof obj.description === 'string' && obj.description.trim() ? obj.description.trim() : undefined
+
+    let props: DesignSystemPropDef[] | undefined
+    if (obj.props !== undefined) {
+      if (!Array.isArray(obj.props)) {
+        return { ok: false, error: `component "${exportName}": props must be an array` }
+      }
+      if (obj.props.length > DS_MAX_PROPS_PER_COMPONENT) {
+        return { ok: false, error: `component "${exportName}": at most ${DS_MAX_PROPS_PER_COMPONENT} props` }
+      }
+      props = []
+      const seenProps = new Set<string>()
+      for (const p of obj.props) {
+        if (!p || typeof p !== 'object') {
+          return { ok: false, error: `component "${exportName}": each prop must be an object` }
+        }
+        const po = p as Record<string, unknown>
+        const propName = String(po.name ?? '').trim()
+        if (!PROP_NAME_RE.test(propName)) {
+          return { ok: false, error: `component "${exportName}": invalid prop name "${propName}"` }
+        }
+        if (seenProps.has(propName)) {
+          return { ok: false, error: `component "${exportName}": duplicate prop "${propName}"` }
+        }
+        seenProps.add(propName)
+        const type = po.type
+        if (type !== 'enum' && type !== 'text' && type !== 'boolean' && type !== 'number') {
+          return {
+            ok: false,
+            error: `component "${exportName}" prop "${propName}": type must be enum, text, boolean, or number`,
+          }
+        }
+        let options: string[] | undefined
+        if (type === 'enum') {
+          if (!Array.isArray(po.options) || po.options.length === 0) {
+            return { ok: false, error: `component "${exportName}" enum prop "${propName}" requires non-empty options` }
+          }
+          options = po.options.map((v) => String(v))
+        }
+        let defVal: string | boolean | number | undefined
+        if (po.default !== undefined) {
+          if (type === 'boolean' && typeof po.default === 'boolean') defVal = po.default
+          else if (type === 'number' && typeof po.default === 'number' && Number.isFinite(po.default))
+            defVal = po.default
+          else if ((type === 'text' || type === 'enum') && typeof po.default === 'string') defVal = po.default
+        }
+        props.push({
+          name: propName,
+          type,
+          ...(options ? { options } : {}),
+          ...(defVal !== undefined ? { default: defVal } : {}),
+          ...(typeof po.label === 'string' && po.label.trim() ? { label: po.label.trim() } : {}),
+          ...(typeof po.description === 'string' && po.description.trim()
+            ? { description: po.description.trim() }
+            : {}),
+        })
+      }
+    }
+
+    const rawPreview = (obj.previewSize ?? obj.preview_size) as Record<string, unknown> | undefined
+    let previewSize: { width?: number; height?: number } | undefined
+    if (rawPreview && typeof rawPreview === 'object') {
+      const w =
+        typeof rawPreview.width === 'number' && Number.isFinite(rawPreview.width)
+          ? Math.max(40, Math.min(1200, Math.round(rawPreview.width)))
+          : undefined
+      const h =
+        typeof rawPreview.height === 'number' && Number.isFinite(rawPreview.height)
+          ? Math.max(24, Math.min(800, Math.round(rawPreview.height)))
+          : undefined
+      if (w !== undefined || h !== undefined) previewSize = { ...(w ? { width: w } : {}), ...(h ? { height: h } : {}) }
+    }
+
+    const rawSample = (obj.sampleProps ?? obj.sample_props) as unknown
+    const sampleProps =
+      rawSample && typeof rawSample === 'object' && !Array.isArray(rawSample)
+        ? (rawSample as Record<string, unknown>)
+        : undefined
+
+    result.push({
+      exportName,
+      ...(displayName ? { displayName } : {}),
+      ...(group ? { group } : {}),
+      ...(description ? { description } : {}),
+      ...(props ? { props } : {}),
+      ...(previewSize ? { previewSize } : {}),
+      ...(sampleProps ? { sampleProps } : {}),
+    })
+  }
+  return { ok: true, value: result }
+}
+
+/** Build initial props object for a catalog component: prop defaults merged with sampleProps. */
+export function defaultPropsForComponent(comp?: DesignSystemComponentDef): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const prop of comp?.props ?? []) {
+    if (prop.default !== undefined) out[prop.name] = prop.default
+    else if (prop.type === 'enum' && prop.options?.length) out[prop.name] = prop.options[0]
+  }
+  if (comp?.sampleProps) {
+    Object.assign(out, comp.sampleProps)
+  }
+  return out
+}
+
+export function parseDoopDsProps(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {}
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function escapeAttrDouble(val: string): string {
+  return val.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function escapeAttrSingle(val: string): string {
+  return val.replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** Serialize a clean declarative <doop-ds> placeholder tag. */
+export function buildDoopDsTag(opts: {
+  ds: string
+  component: string
+  props?: Record<string, unknown>
+  version?: string
+  extraAttrs?: Record<string, string>
+}): string {
+  const attrs: string[] = [`ds="${escapeAttrDouble(opts.ds)}"`, `component="${escapeAttrDouble(opts.component)}"`]
+  if (opts.version && opts.version !== 'latest') {
+    attrs.push(`version="${escapeAttrDouble(opts.version)}"`)
+  }
+  if (opts.props && Object.keys(opts.props).length > 0) {
+    attrs.push(`props='${escapeAttrSingle(JSON.stringify(opts.props))}'`)
+  }
+  if (opts.extraAttrs) {
+    for (const [k, v] of Object.entries(opts.extraAttrs)) {
+      if (k === 'ds' || k === 'component' || k === 'version' || k === 'props') continue
+      attrs.push(`${k}="${escapeAttrDouble(v)}"`)
+    }
+  }
+  return `<doop-ds ${attrs.join(' ')}></doop-ds>`
 }
 
 export function resolveDesignSystemManifest(
@@ -241,5 +449,10 @@ export function resolveDesignSystemManifest(
     description: input?.description !== undefined ? input.description.trim() : (previous?.description ?? ''),
     runtime,
     docs,
+    ...(input?.components !== undefined
+      ? { components: input.components }
+      : previous?.components !== undefined
+        ? { components: previous.components }
+        : {}),
   }
 }

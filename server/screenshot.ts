@@ -9,6 +9,7 @@ import { withHostedPhotos } from './photoProxy.ts'
 import { renderedHeight } from './renderLimits.ts'
 import { LayerNotFoundError } from './layerExport.ts'
 import { settleFonts } from './renderFonts.ts'
+import { DOOP_DS_RUNTIME_SCRIPT } from '../shared/doopDsRuntime.ts'
 import {
   createRenderer,
   remoteConnectFailure,
@@ -193,6 +194,10 @@ async function loadFrameInto(page: Page, frame: Frame): Promise<void> {
   if (!/<base\s/i.test(html)) {
     const baseTag = `<base href="${assetOrigin.replace(/"/g, '&quot;')}/">`
     html = /<head[^>]*>/i.test(html) ? html.replace(/<head([^>]*)>/i, `<head$1>${baseTag}`) : baseTag + html
+  }
+  if (/<doop-ds\b/i.test(html)) {
+    const dsScript = `<script data-doop-ds-asset="1">window.__doopDsOrigin=${JSON.stringify(assetOrigin)};${DOOP_DS_RUNTIME_SCRIPT.replace(/<\/script/gi, '<\\/script')}</script>`
+    html = /<\/body\s*>/i.test(html) ? html.replace(/<\/body\s*>/i, `${dsScript}</body>`) : html + dsScript
   }
   try {
     await page.setContent(html, {

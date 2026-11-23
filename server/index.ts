@@ -119,7 +119,7 @@ import * as backgrounds from './backgrounds.ts'
 import { serveIcon } from './iconProxy.ts'
 import { servePhoto } from './photoProxy.ts'
 import { serveDesignSystemAsset } from './specflowDesignSystem.ts'
-import { hydrateDesignSystems } from './designSystemRegistry.ts'
+import { designSystemsForCanvas, hydrateDesignSystems } from './designSystemRegistry.ts'
 import {
   designSystemsRouter,
   handleDesignSystemTicketCommit,
@@ -1159,6 +1159,11 @@ app.get('/api/canvases/:id/agents', (req, res) => {
 app.get('/api/canvases/:id/fonts', (req, res) => {
   const canvas = requireCanvas(req, res, req.params.id, 'view')
   if (canvas) res.json(fontsForCanvas(canvas))
+})
+/* hosted design systems available to this canvas (Components panel + Inspector) */
+app.get('/api/canvases/:id/design-systems', (req, res) => {
+  const canvas = requireCanvas(req, res, req.params.id, 'view')
+  if (canvas) res.json(designSystemsForCanvas(canvas, req.user!.id))
 })
 /* the skills a request on this canvas can name, for the /handle menu. Only
    an editor can ask an agent for work (refuseAgentMention turns a commenter's
@@ -2842,6 +2847,8 @@ app.post('/api/frames/:id/instances', (req, res) => {
       {
         frameId: current.id,
         component: String(body.component ?? ''),
+        ds: typeof body.ds === 'string' ? body.ds : undefined,
+        version: typeof body.version === 'string' ? body.version : undefined,
         props: body.props,
         target: body.target,
         position: body.position,

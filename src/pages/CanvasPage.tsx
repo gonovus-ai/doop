@@ -41,6 +41,7 @@ import {
   dropLibraryComponent,
   parseLibraryDrag,
 } from '../lib/components'
+import { DS_COMPONENT_DRAG_TYPE, dropDsComponent, parseDsDrag } from '../lib/designSystems'
 import { Inspector } from '../components/Inspector'
 import { PagePanel } from '../components/PagePanel'
 import { ElementPanel } from '../components/ElementPanel'
@@ -545,7 +546,9 @@ export function CanvasPage({
     /* files from outside, or a component card from the Components panel; both
        need the frames' shields up so the drop reaches the window */
     const carriesComponent = (e: DragEvent) =>
-      [COMPONENT_DRAG_TYPE, LIBRARY_COMPONENT_DRAG_TYPE].some((type) => e.dataTransfer?.types.includes(type))
+      [COMPONENT_DRAG_TYPE, LIBRARY_COMPONENT_DRAG_TYPE, DS_COMPONENT_DRAG_TYPE].some((type) =>
+        e.dataTransfer?.types.includes(type),
+      )
     const carriesFiles = (e: DragEvent) => (e.dataTransfer?.types.includes('Files') ?? false) || carriesComponent(e)
     let depth = 0
     const setDragging = useStore.getState().setFileDragging
@@ -576,6 +579,13 @@ export function CanvasPage({
       const componentId = e.dataTransfer?.getData(COMPONENT_DRAG_TYPE)
       if (componentId) {
         void dropComponent(componentId, { x: e.clientX, y: e.clientY })
+        return
+      }
+      /* a hosted Design System component card: inserts a live <doop-ds> React component */
+      const dsData = e.dataTransfer?.getData(DS_COMPONENT_DRAG_TYPE)
+      if (dsData) {
+        const drag = parseDsDrag(dsData)
+        if (drag) void dropDsComponent(drag, { x: e.clientX, y: e.clientY })
         return
       }
       /* a library's card: this canvas takes the component up on the drop, then places it */

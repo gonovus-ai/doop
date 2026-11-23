@@ -132,9 +132,10 @@ import {
   listDesignSystemsForUser,
   publishRelease,
   rollbackDesignSystem,
+  updateDesignSystemCatalog,
   type PublishFileInput,
 } from './designSystemRegistry.ts'
-import { DS_MAX_FILE_BYTES, type PartialManifestInput } from '../shared/designSystems.ts'
+import { DS_MAX_FILE_BYTES, normalizeComponentCatalog, type PartialManifestInput } from '../shared/designSystems.ts'
 
 /* What every agent gets in the handshake. Claude Code cuts server instructions at 4,096
    characters (older versions at 2,048) and ChatGPT reads the first 512 most, so this is the
@@ -755,6 +756,29 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
     },
   )
 
+  const dsCatalogPropSchema = z.object({
+    name: z.string().describe('React prop name, e.g. "variant", "size", "children", "checked"'),
+    type: z.enum(['enum', 'text', 'boolean', 'number']),
+    options: z.array(z.string()).optional().describe('Allowed values when type="enum"'),
+    default: z.union([z.string(), z.boolean(), z.number()]).optional(),
+    label: z.string().optional().describe('Optional display label in the Inspector'),
+    description: z.string().optional(),
+  })
+
+  const dsCatalogComponentSchema = z.object({
+    exportName: z.string().optional().describe('Export name on window.<globalName>, e.g. "Button"'),
+    export_name: z.string().optional().describe('Alias for exportName'),
+    displayName: z.string().optional(),
+    display_name: z.string().optional(),
+    group: z.string().optional().describe('Optional group heading in the Components panel, e.g. "Actions"'),
+    description: z.string().optional(),
+    props: z.array(dsCatalogPropSchema).optional(),
+    previewSize: z.object({ width: z.number().optional(), height: z.number().optional() }).optional(),
+    preview_size: z.object({ width: z.number().optional(), height: z.number().optional() }).optional(),
+    sampleProps: z.record(z.unknown()).optional(),
+    sample_props: z.record(z.unknown()).optional(),
+  })
+
   server.registerTool(
     'publish_design_system_bundle',
     {
@@ -817,6 +841,12 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
               .string()
               .optional()
               .describe('Live Markdown usage guide returned by get_design_system({ section: "guide" })'),
+            components: z
+              .array(dsCatalogComponentSchema)
+              .optional()
+              .describe(
+                'Catalog of real React components to expose in the Components panel, Inspector, and list_components',
+              ),
           })
           .optional(),
         notes: z.string().optional().describe('Optional release notes / changelog summary'),
@@ -828,6 +858,10 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
     },
     async ({ name, version, workspace_id, upload_mode, files, manifest, notes, overwrite }) => {
       if (!ownerId) return err('authentication required — only workspace members may publish design systems')
+      if (manifest?.components !== undefined) {
+        const normalized = normalizeComponentCatalog(manifest.components)
+        if (!normalized.ok) return err(normalized.error)
+      }
       const parsedManifest: PartialManifestInput | undefined = manifest
         ? {
             displayName: manifest.display_name,
@@ -841,6 +875,14 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
               ...(manifest.body_css !== undefined ? { bodyCss: manifest.body_css } : {}),
             },
             ...(manifest.guide_markdown !== undefined ? { docs: { guideMarkdown: manifest.guide_markdown } } : {}),
+            ...(manifest.components !== undefined
+              ? {
+                  components: (() => {
+                    const parsed = normalizeComponentCatalog(manifest.components)
+                    return parsed.ok ? parsed.value : []
+                  })(),
+                }
+              : {}),
           }
         : undefined
 
@@ -942,6 +984,43 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
             : e instanceof Error
               ? e.message
               : 'failed to publish design system bundle',
+        )
+      }
+    },
+  )
+
+  server.registerTool(
+    'set_design_system_catalog',
+    {
+      title: 'Register Design System component catalog',
+      description:
+        'Declare or update the interactive React component catalog for a hosted Design System (exportName, displayName, group, description, props with enum/text/boolean/number, previewSize, sampleProps). Registered components immediately appear in the Components panel (draggable as live <doop-ds> instances), the right Inspector, and MCP list_components — without republishing the bundle.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        name: z.string().describe('Design system slug, e.g. "gonovus"'),
+        components: z
+          .array(dsCatalogComponentSchema)
+          .describe('Ordered list of components exported by window.<globalName>'),
+      },
+    },
+    async ({ name, components }) => {
+      if (!ownerId) return err('authentication required — only workspace members may update design system catalogs')
+      try {
+        const updated = await updateDesignSystemCatalog(name, ownerId, components)
+        return text({
+          ok: true,
+          name: updated.name,
+          latest_version: updated.latestVersion,
+          component_count: updated.manifest.components?.length ?? 0,
+          components: updated.manifest.components ?? [],
+        })
+      } catch (e) {
+        return err(
+          e instanceof DesignSystemError
+            ? e.message
+            : e instanceof Error
+              ? e.message
+              : 'failed to update design system catalog',
         )
       }
     },

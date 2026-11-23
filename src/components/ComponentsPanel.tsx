@@ -1,7 +1,14 @@
 import { useMemo, useRef, useState } from 'react'
 import { activeComponents, type ComponentDef } from '../../shared/components'
+import {
+  defaultPropsForComponent,
+  type DesignSystemComponentDef,
+  type DesignSystemSummary,
+} from '../../shared/designSystems'
+import { buildDoopDsPreviewHtml } from '../../shared/doopDsRuntime'
 import { api, type ComponentLibrary } from '../lib/api'
 import { COMPONENT_DRAG_TYPE, goToMain, placeComponent, removeComponent, renameComponent } from '../lib/components'
+import { DS_COMPONENT_DRAG_TYPE, dsDragData, placeDsComponent, useCanvasDesignSystems } from '../lib/designSystems'
 import { useT } from '../lib/i18n'
 import { useCanvasLibrary } from '../lib/library'
 import { useLibraryResume } from '../lib/libraryResume'
@@ -64,6 +71,7 @@ export function ComponentsPanel() {
   const canEdit = useStore(canEditOpenCanvas)
   const tokenStamp = useTokenStamp()
   const shared = useCanvasLibrary(canvasId ?? '', canEdit)
+  const { systems: designSystems } = useCanvasDesignSystems(canvasId)
   /* the publish dialog (`only` = opened from that component's menu) and the way to a library */
   const [publishing, setPublishing] = useState<{ only?: string } | null>(null)
   const [wall, setWall] = useState<{ workspaceId?: string; reason: string; only?: string } | null>(null)
@@ -93,6 +101,23 @@ export function ComponentsPanel() {
       .filter((def) => !wanted || `${def.name} ${def.description}`.toLowerCase().includes(wanted))
       .sort((a, b) => a.name.localeCompare(b.name))
   }, [components, query])
+
+  const filteredDs = useMemo(() => {
+    const wanted = query.trim().toLowerCase()
+    return designSystems
+      .map((ds) => {
+        const catalog = ds.manifest.components ?? []
+        const matched = catalog.filter(
+          (comp) =>
+            !wanted ||
+            `${ds.name} ${ds.displayName} ${comp.exportName} ${comp.displayName ?? ''} ${comp.group ?? ''} ${comp.description ?? ''}`
+              .toLowerCase()
+              .includes(wanted),
+        )
+        return { ds, components: matched }
+      })
+      .filter((entry) => entry.components.length > 0)
+  }, [designSystems, query])
 
   if (!canvasId) return null
   const status = shared.status
@@ -151,9 +176,11 @@ export function ComponentsPanel() {
             </Button>
           </div>
         )}
-        {shown.length === 0 && (
+        {shown.length === 0 && filteredDs.length === 0 && (
           <p className="px-0.5 text-caption text-ink-soft">
-            {components?.length ? t('components.noMatch') : t('components.empty')}
+            {components?.length || designSystems.some((d) => (d.manifest.components?.length ?? 0) > 0)
+              ? t('components.noMatch')
+              : t('components.empty')}
           </p>
         )}
         {shown.map((def) => (
@@ -276,6 +303,9 @@ export function ComponentsPanel() {
             {def.description && <p className="line-clamp-2 text-caption text-ink-soft">{def.description}</p>}
           </article>
         ))}
+        {filteredDs.map(({ ds, components: dsComponents }) => (
+          <HostedDesignSystemGroup key={ds.name} ds={ds} components={dsComponents} canEdit={canEdit} />
+        ))}
         <LibrarySection
           canvasId={canvasId}
           canEdit={canEdit}
@@ -326,5 +356,130 @@ export function ComponentsPanel() {
       </div>
       <PanelSearch value={query} placeholder={t('components.search')} onChange={setQuery} />
     </>
+  )
+}
+
+function HostedDesignSystemGroup({
+  ds,
+  components,
+  canEdit,
+}: {
+  ds: DesignSystemSummary
+  components: DesignSystemComponentDef[]
+  canEdit: boolean
+}) {
+  const t = useT()
+  const grouped = useMemo(() => {
+    const groups = new Map<string, DesignSystemComponentDef[]>()
+    for (const comp of components) {
+      const key = comp.group ?? ''
+      const list = groups.get(key)
+      if (list) list.push(comp)
+      else groups.set(key, [comp])
+    }
+    return [...groups.entries()]
+  }, [components])
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+
+  return (
+    <section
+      data-slot="ds-components-group"
+      data-ds-name={ds.name}
+      className="flex flex-col gap-2 border-t border-line-soft pt-2.5 first:border-t-0 first:pt-0"
+    >
+      <header className="flex min-w-0 items-center gap-1.5">
+        <BookOpenIcon size="rail" className="flex-none text-brand" aria-hidden />
+        <span className="truncate text-body font-medium text-ink">{ds.displayName || ds.name}</span>
+        <span className="ml-auto flex-none rounded-pill bg-paper-deep px-1.5 py-0.5 font-mono text-micro text-ink-soft">
+          v{ds.latestVersion}
+        </span>
+      </header>
+      {grouped.map(([groupName, items]) => (
+        <div key={groupName || '__default'} className="flex flex-col gap-2">
+          {groupName && <h4 className="px-0.5 text-micro font-medium text-ink-faint">{groupName}</h4>}
+          {items.map((comp) => {
+            const label = comp.displayName || comp.exportName
+            const sample = defaultPropsForComponent(comp)
+            const previewWidth = comp.previewSize?.width ?? 240
+            const previewHeight = comp.previewSize?.height ?? 96
+            return (
+              <article
+                key={comp.exportName}
+                className="flex flex-col gap-1.5"
+                data-ds-component-card={`${ds.name}:${comp.exportName}`}
+              >
+                <div
+                  draggable={canEdit}
+                  aria-label={canEdit ? t('components.dragHint', { name: label }) : label}
+                  className={cn(
+                    'flex w-full flex-col gap-1.5 text-left',
+                    canEdit && 'cursor-grab active:cursor-grabbing',
+                  )}
+                  onDragStart={(event) => {
+                    event.dataTransfer.setData(
+                      DS_COMPONENT_DRAG_TYPE,
+                      dsDragData({
+                        ds: ds.name,
+                        component: comp.exportName,
+                        props: sample,
+                        previewSize: comp.previewSize,
+                        displayName: label,
+                      }),
+                    )
+                    event.dataTransfer.effectAllowed = 'copy'
+                  }}
+                >
+                  <ComponentThumb
+                    allowScripts
+                    title={t('components.previewTitle', { name: label })}
+                    sheetKey={`ds:${ds.name}:${ds.latestVersion}:${comp.exportName}:${JSON.stringify(sample)}`}
+                    load={() =>
+                      Promise.resolve({
+                        html: buildDoopDsPreviewHtml({
+                          origin,
+                          ds: ds.name,
+                          component: comp.exportName,
+                          version: ds.latestVersion,
+                          props: sample,
+                          width: previewWidth,
+                          height: previewHeight,
+                        }),
+                        width: previewWidth,
+                        height: previewHeight,
+                      })
+                    }
+                  />
+                  <span className="flex min-w-0 items-center gap-1.5 text-body text-ink">
+                    <ComponentIcon size="rail" className="flex-none text-brand" />
+                    <span className="truncate">{label}</span>
+                    {canEdit && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <IconButton
+                            size="sm"
+                            className="ml-auto flex-none"
+                            aria-label={t('components.moreActions', { name: label })}
+                            data-component-menu
+                          >
+                            <MoreHorizontalIcon size="rail" aria-hidden />
+                          </IconButton>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" width="md">
+                          <DropdownMenuItem onSelect={() => void placeDsComponent(ds, comp)}>
+                            {t('components.insertInstance')}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
+                  </span>
+                </div>
+                {comp.description && <p className="line-clamp-2 text-caption text-ink-soft">{comp.description}</p>}
+              </article>
+            )
+          })}
+        </div>
+      ))}
+    </section>
   )
 }
