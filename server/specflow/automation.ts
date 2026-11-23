@@ -14,7 +14,7 @@ async function requireConnection(ownerId: string) {
 
 export async function automationProjects(userId: string) {
   const conn = await requireConnection(userId)
-  const projects = await listProjects(conn.baseUrl, conn.accessToken, { status: 'active' })
+  const projects = await listProjects(conn.baseUrl, conn.accessToken, { status: 'Active' })
   return projects.filter((p) => !p.archivedAt && !p.trashedAt)
 }
 

@@ -119,13 +119,21 @@ export async function verifyIdentity(baseUrl: string, apiKey: string): Promise<{
   return { userId }
 }
 
+const PROJECT_STATUS_MAP: Record<string, string> = {
+  active: 'Active',
+  archived: 'Archived',
+  trashed: 'Trashed',
+}
+
 export async function listProjects(
   baseUrl: string,
   apiKey: string,
   options?: { status?: string; workspaceId?: string },
 ): Promise<SpecFlowProject[]> {
   const qs = new URLSearchParams()
-  if (options?.status) qs.set('status', options.status)
+  if (options?.status) {
+    qs.set('status', PROJECT_STATUS_MAP[options.status.toLowerCase()] ?? options.status)
+  }
   if (options?.workspaceId) qs.set('workspaceId', options.workspaceId)
   const suffix = qs.toString() ? `?${qs.toString()}` : ''
   const data = await apiRequest<{ projects?: Record<string, unknown>[] }>(
@@ -208,7 +216,7 @@ export async function createWorkItem(
     apiKey,
     'POST',
     `/v1/projects/${encodeURIComponent(projectId)}/work-items`,
-    { body, idempotencyKey: `doop-wi-${randomUUID()}` },
+    { body, idempotencyKey: randomUUID() },
   )
   const item = data?.workItem ?? {}
   const id = typeof item.id === 'string' ? item.id : ''
@@ -230,7 +238,7 @@ export async function addWorkItemComment(
     apiKey,
     'POST',
     `/v1/projects/${encodeURIComponent(projectId)}/work-items/${encodeURIComponent(workItemId)}/comments`,
-    { body: { content: content.trim().slice(0, 20_000) } },
+    { body: { content: content.trim().slice(0, 20_000) }, idempotencyKey: randomUUID() },
   )
 }
 
@@ -255,6 +263,7 @@ export async function addWorkItemResourceLink(
           url: url.trim().slice(0, 4096),
         },
       },
+      idempotencyKey: randomUUID(),
     },
   )
 }
@@ -332,7 +341,7 @@ export async function uploadScreenImage(
       contentType: 'image/png',
       size: png.byteLength,
     },
-    idempotencyKey: `doop-screen-up-${randomUUID()}`,
+    idempotencyKey: randomUUID(),
   })
 
   const uploadUrl = reservation.uploadUrl.startsWith('http')
@@ -359,7 +368,7 @@ export async function uploadScreenImage(
     `/v1/workspaces/${encodedWs}/screens/${encodedScreen}/image/finalize`,
     {
       body: { uploadId: reservation.uploadId },
-      idempotencyKey: `doop-screen-fin-${randomUUID()}`,
+      idempotencyKey: randomUUID(),
     },
   )
 }

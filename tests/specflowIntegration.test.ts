@@ -106,6 +106,12 @@ beforeAll(async () => {
         return
       }
       if (req.method === 'GET' && url.pathname === '/v1/projects') {
+        const statusParam = url.searchParams.get('status')
+        if (statusParam && !['Active', 'Archived', 'Trashed'].includes(statusParam)) {
+          res.statusCode = 400
+          res.end(JSON.stringify({ code: 'INVALID_REQUEST', message: 'The request does not match the API contract' }))
+          return
+        }
         res.end(
           JSON.stringify({
             projects: [
@@ -130,7 +136,11 @@ beforeAll(async () => {
         )
         return
       }
-      if (req.method === 'GET' && url.pathname === '/v1/projects/proj-spf/work-items/wi-70') {
+      if (
+        req.method === 'GET' &&
+        (url.pathname === '/v1/projects/proj-spf/work-items/wi-70' ||
+          url.pathname === '/v1/projects/proj-spf/work-items/SPF-70')
+      ) {
         res.end(
           JSON.stringify({
             workItem: {
@@ -144,17 +154,33 @@ beforeAll(async () => {
         return
       }
       if (req.method === 'POST' && url.pathname === '/v1/projects/proj-spf/work-items') {
+        if (!req.headers['idempotency-key']) {
+          res.statusCode = 400
+          res.end(JSON.stringify({ error: 'Missing idempotency-key' }))
+          return
+        }
         const b = (body ?? {}) as { title?: string }
         res.statusCode = 201
         res.end(JSON.stringify({ workItem: { id: 'wi-99', key: 'SPF-99', title: b.title ?? 'Untitled' } }))
         return
       }
       if (req.method === 'POST' && url.pathname.endsWith('/comments')) {
+        const ik = String(req.headers['idempotency-key'] ?? '')
+        if (!/^[0-9a-f-]{36}$/i.test(ik)) {
+          res.statusCode = 400
+          res.end(JSON.stringify({ error: 'UUID idempotency-key required' }))
+          return
+        }
         res.statusCode = 201
         res.end(JSON.stringify({ comment: { id: 'cmt-1' } }))
         return
       }
       if (req.method === 'POST' && url.pathname.endsWith('/resource-links')) {
+        if (!req.headers['idempotency-key']) {
+          res.statusCode = 400
+          res.end(JSON.stringify({ error: 'Missing idempotency-key' }))
+          return
+        }
         res.statusCode = 201
         res.end(JSON.stringify({ link: { id: 'lnk-1' } }))
         return
@@ -388,8 +414,9 @@ describe('SpecFlow Integration Phase 2: Inbound Standard Webhooks delegation →
         eventId: 'evt-sf-70',
         workspaceId: 'sf-ws-1',
         projectId: 'proj-spf',
-        workItemId: 'wi-70',
+        workItemSystemId: 'wi-70',
         workItemKey: 'SPF-70',
+        workItemVersion: 3,
       },
     })
 
@@ -430,8 +457,8 @@ describe('SpecFlow Integration Phase 2: Inbound Standard Webhooks delegation →
 
     // SpecFlow received write-back comment + resource link pointing to the new Doop canvas!
     await waitFor(() =>
-      specflowRequests.find((r) => r.method === 'POST' && r.url.endsWith('/wi-70/comments')) &&
-      specflowRequests.find((r) => r.method === 'POST' && r.url.endsWith('/wi-70/resource-links'))
+      specflowRequests.find((r) => r.method === 'POST' && r.url.endsWith('/SPF-70/comments')) &&
+      specflowRequests.find((r) => r.method === 'POST' && r.url.endsWith('/SPF-70/resource-links'))
         ? true
         : undefined,
     )

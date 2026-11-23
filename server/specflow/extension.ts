@@ -144,7 +144,10 @@ export const specflowExtension: ServerExtension = {
           'List accessible SpecFlow projects (including each project’s workspaceId) using the user’s SpecFlow integration.',
         annotations: readAnn,
         inputSchema: {
-          status: z.enum(['active', 'archived']).optional().describe('Filter projects by lifecycle status'),
+          status: z
+            .enum(['Active', 'Archived', 'Trashed', 'active', 'archived', 'trashed'])
+            .optional()
+            .describe('Filter projects by lifecycle status (Active, Archived, Trashed)'),
           workspace_id: z.string().optional().describe('Optional SpecFlow workspace ID filter'),
         },
       },

@@ -74,6 +74,7 @@ const eventSchema = z.object({
       workspaceId: z.string().optional(),
       projectId: z.string().optional(),
       workItemId: z.string().optional(),
+      workItemSystemId: z.string().optional(),
       workItemKey: z.string().optional(),
       commentId: z.string().optional(),
     })
@@ -158,8 +159,9 @@ export function specflowWebhookRouter() {
       }
 
       const projectId = event.data?.projectId
-      const workItemId = event.data?.workItemId
-      const workItemKey = event.data?.workItemKey || workItemId || 'SpecFlow'
+      const workItemId = event.data?.workItemId || event.data?.workItemKey || event.data?.workItemSystemId
+      const workItemKey =
+        event.data?.workItemKey || event.data?.workItemId || event.data?.workItemSystemId || 'SpecFlow'
       if (!projectId || !workItemId) {
         return res.json({ ok: true, ignored: 'missing projectId or workItemId' })
       }
