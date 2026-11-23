@@ -25,6 +25,7 @@ import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Toast } from '../components/ui/toast'
 import { ChevronRightIcon } from '../components/ui/icons'
 import { FontLibrary } from '../components/FontLibrary'
+import { DesignSystems } from '../components/DesignSystems'
 import { CustomAgents } from '../components/CustomAgents'
 import { Skills } from '../components/Skills'
 import { WorkspaceLibraries } from '../components/WorkspaceLibraries'
@@ -272,7 +273,10 @@ export function Workspace({ workspaceId }: { workspaceId: string }) {
               <Skills workspaceId={ws.id} />
             </>
           ) : pane === 'libraries' ? (
-            <WorkspaceLibraries workspaceId={ws.id} onToast={showToast} />
+            <>
+              <WorkspaceLibraries workspaceId={ws.id} onToast={showToast} />
+              <DesignSystems workspaceId={ws.id} onToast={showToast} />
+            </>
           ) : pane === 'billing' ? (
             <BillingPane
               ws={ws}

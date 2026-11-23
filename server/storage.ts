@@ -17,15 +17,18 @@ const DISK_DIR = path.join(process.cwd(), 'data', 'assets')
 
 export const storageMode: 'bucket' | 'disk' = BUCKET ? 'bucket' : 'disk'
 
-/* keys are `<nanoid>.<ext>`, optionally under the `thumb/` prefix (derived
-   frame previews — a folder of their own so they can be purged or lifecycle-
-   ruled without touching user uploads) or the `bg/` prefix (the curated
-   background library, server/backgrounds.ts). Anything else is a bug, and in
-   disk mode the check doubles as the path-traversal guard: known literal
-   prefixes, no dots or slashes in the name. */
+/* keys are `<nanoid>.<ext>`, optionally under a flat prefix (`thumb/`, `bg/`,
+   `iconify/`, `pexels/`), or nested versioned design-system bundles under
+   `ds/<name>/<version>/<relpath>`. Anything else is a bug, and in disk mode
+   the check doubles as the path-traversal guard: no `..` or unexpected chars. */
+const FLAT_KEY_RE = /^(thumb\/|bg\/|iconify\/|pexels\/)?[A-Za-z0-9_-]+\.[a-z0-9]+$/
+const DS_KEY_RE =
+  /^ds\/[a-z0-9][a-z0-9_-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+
 function assertKey(key: string) {
-  if (!/^(thumb\/|bg\/|iconify\/|pexels\/)?[A-Za-z0-9_-]+\.[a-z0-9]+$/.test(key))
-    throw new Error(`malformed storage key: ${key}`)
+  if (FLAT_KEY_RE.test(key)) return
+  if (DS_KEY_RE.test(key) && !key.split('/').some((seg) => seg === '.' || seg === '..')) return
+  throw new Error(`malformed storage key: ${key}`)
 }
 
 let s3: S3Client | undefined

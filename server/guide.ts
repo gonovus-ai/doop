@@ -14,6 +14,7 @@ export const GUIDE_TOPICS = [
   'design-craft',
   'review-pipeline',
   'specflow-components',
+  'gonovus-components',
   'images',
   'components',
   'prototypes',
@@ -30,8 +31,9 @@ export const GUIDE_TOPIC_SUMMARIES: Record<GuideTopic, string> = {
   'doop-instructions': 'the main guide: load it first, before any other Doop tool',
   'design-craft': 'clarifying questions, multi-direction exploration with tradeoffs, and anti-AI-slop craft',
   'review-pipeline': 'mandatory 5-role self-review (UX, Copy, Brand, A11y, Polish) + inspect_frame + save_decision',
-  'specflow-components':
-    'authoring real React 19 SpecFlow component frames (get_design_system + create_specflow_frame) and Usage Notes',
+  'specflow-components': 'authoring real React 19 SpecFlow component frames (get_design_system + create_ds_frame)',
+  'gonovus-components':
+    'loading GoNovus React 18 UMD bundle (/ds/gonovus/latest, window.GoNovusA) and publishing updates',
   images: 'photos, backgrounds, icons, logos, generated images and uploads in full',
   components: 'nesting, variants, overrides, deleting, other canvases and workspace libraries',
   prototypes: 'wiring screens into a clickable flow',
@@ -609,27 +611,11 @@ Two tools reach the Doop team, never the humans on the canvas, and change no can
 
 Never include secrets. A human's design feedback is not this: record that with save_decision.
 
-## Team Skills & SpecFlow Real-Component Workflow
+## Team Skills & Hosted Design Systems
 
-This self-hosted Doop instance ships live editable Skills (managed in **Settings -> Skills**)
-and a real compiled SpecFlow React 19 component runtime served from this server's own \`/ds/\`
-origin:
-
-- **Load live Skills first**: call \`list_skills\` (passing \`canvas_id\` when working on a
-  canvas) and call \`get_skill\` for every relevant handle before creating or editing frames.
-  Team Skills in \`Settings -> Skills\` outrank generic defaults.
-- **Explore before polishing**: for new features or ambiguous briefs, load
-  \`get_guide({ topic: "design-craft" })\` — clarify the 1–3 highest-leverage forks first, or
-  put 2–4 genuinely distinct direction artboards on the canvas with honest tradeoffs before
-  committing to full hi-fi states.
-- **SpecFlow UI MUST render real components**: NEVER hand-draw fake HTML/CSS look-alikes of
-  SpecFlow controls. Load \`get_guide({ topic: "specflow-components" })\`, call
-  \`get_design_system\` to inspect real exports and prop types, and author JSX via
-  \`create_specflow_frame\` / \`update_specflow_frame\` (server compiles JSX with esbuild and
-  loads \`window.SpecFlow\` + React 19 over same-origin \`/ds/specflow/latest\`).
-- **Mandatory 5-role self-review**: before presenting work to humans, load
-  \`get_guide({ topic: "review-pipeline" })\` and verify UX, Copy, Brand, Accessibility, and
-  Visual Polish alongside \`get_frame_screenshot\` and \`inspect_frame\`.
+- **Skills**: call \`list_skills\` + \`get_skill\` before designing; workspace Skills outrank defaults.
+- **Hosted Design Systems** (\`/ds/<name>/latest\`): never hand-draw fake copies of product components. Call \`list_design_systems\` / \`get_design_system\`, load \`specflow-components\` or \`gonovus-components\`, and use \`create_ds_frame\` / \`update_ds_frame\`.
+- **Craft & Review**: use \`design-craft\` for open briefs and \`review-pipeline\` + \`get_frame_screenshot\` + \`inspect_frame\` before hand-off.
 
 ## More topics
 
@@ -781,6 +767,69 @@ Follow \`docs/agents/web-product-interactions.md\`:
   (border/caret only, no outer CSS ring). Dialogs focus the first editable text field; Sheets
   are reading panels; AlertDialogs focus the action button.
 - **Charts**: Use \`TimeSeriesChart\` with \`ChartTone\` tokens — never hand-write chart SVGs.
+`,
+  'gonovus-components': `# GoNovus Real-Component System (\`/ds/gonovus/latest\`)
+
+## 1. Hosted bundle & same-origin React 18 runtime
+This Doop server hosts the GoNovus Design System at \`/ds/gonovus/latest/\` (and immutable
+versioned snapshots at \`/ds/gonovus/<version>/\`):
+- \`/ds/gonovus/latest/tokens.css\` — design tokens (CSS custom properties)
+- \`/ds/gonovus/latest/components/bundle.css\` — compiled component styles
+- \`/ds/gonovus/latest/components/bundle.js\` — UMD component bundle attaching \`window.GoNovusA\`
+  (depends on global \`window.React\` 18 and \`window.ReactDOM\` 18)
+
+Doop also hosts **same-origin React 18 UMD** at:
+- \`/ds/_runtime/react-18/react.production.min.js\`
+- \`/ds/_runtime/react-18/react-dom.production.min.js\`
+
+Always prefer the same-origin \`/ds/_runtime/react-18/\` scripts over external CDNs like
+jsdelivr: Doop's server-side screenshot and inspection renderer (\`get_frame_screenshot\`,
+\`inspect_frame\`) only permits same-origin \`/ds/\` assets and blocks third-party script hosts.
+
+## 2. Option A (Recommended): One-step JSX via \`create_ds_frame\`
+Call \`create_ds_frame({ canvas_id, name, ds_name: "gonovus", jsx })\` (or \`update_ds_frame\`).
+The server compiles JSX with esbuild and automatically loads React 18 UMD + \`tokens.css\` +
+\`components/bundle.css\` + \`components/bundle.js\`, exposing \`React\`, \`useState\`, \`useEffect\`,
+\`useMemo\`, \`useRef\`, \`Fragment\`, and \`GoNovusA\` in scope with \`window.__doopReady\` wired for
+screenshots:
+
+\`\`\`jsx
+function App() {
+  const [enabled, setEnabled] = useState(true);
+  const { Button, Status, Toggle } = GoNovusA;
+  return (
+    <div style={{ padding: 24, display: "flex", gap: 12, alignItems: "center" }}>
+      <Status status={enabled ? "active" : "inactive"} />
+      <Toggle checked={enabled} onCheckedChange={setEnabled} />
+      <Button onClick={() => setEnabled((v) => !v)}>Toggle status</Button>
+    </div>
+  );
+}
+\`\`\`
+
+## 3. Option B: Direct HTML frame loading order
+When authoring raw HTML with \`create_frame\`, load resources in this exact order:
+1. Stylesheets: \`/ds/gonovus/latest/tokens.css\`, then \`/ds/gonovus/latest/components/bundle.css\`
+2. Runtime scripts: \`/ds/_runtime/react-18/react.production.min.js\`, then
+   \`/ds/_runtime/react-18/react-dom.production.min.js\`
+3. Component bundle: \`/ds/gonovus/latest/components/bundle.js\`
+4. Your mount script using \`window.React\`, \`window.ReactDOM.createRoot\`, and \`window.GoNovusA\`
+   (e.g. \`GoNovusA.Button\`, \`GoNovusA.Status\`, \`GoNovusA.Toggle\`).
+5. Set \`window.__doopReady = new Promise(...)\` and resolve it inside a post-mount
+   \`requestAnimationFrame\` so \`get_frame_screenshot\` waits for React to finish painting.
+
+## 4. Sandboxed iframe rules (\`sandbox="allow-scripts"\`)
+- Canvas iframes run with opaque origin \`null\`. Never touch \`localStorage\`, \`sessionStorage\`,
+  \`document.cookie\`, or \`history.pushState\`.
+- Inspect available tokens or live docs anytime via \`get_design_system({ ds_name: "gonovus", section: "overview" | "tokens" | "guide" })\`.
+
+## 5. Publishing new GoNovus versions (zero Doop redeploy)
+Workspace members can publish new versions via \`publish_design_system_bundle\`:
+- For bundles on local disk (especially \`bundle.js\` > 100KB), call
+  \`publish_design_system_bundle({ name: "gonovus", version: "0.2.0", upload_mode: "ticket", files: [{ path: "tokens.css" }, { path: "components/bundle.css" }, { path: "components/bundle.js" }] })\`
+  and run the returned \`curl\` command to stream files and atomically flip \`latest\`.
+- Use \`rollback_design_system({ name: "gonovus", version: "0.1.0" })\` to switch \`latest\` back
+  to any previous version immediately.
 `,
   images: `# Images — search first, then upload
 

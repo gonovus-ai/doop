@@ -32,6 +32,7 @@ import type { BillingInterval, Plan } from '../../shared/billing'
 import type { LinkAccess } from '../../shared/canvasRole'
 import type { CommentAnchorInput } from '../../shared/comments'
 import type { ComponentCode, ComponentDef, ComponentProp, PartOverride } from '../../shared/components'
+import type { DesignSystemDetail, DesignSystemSummary } from '../../shared/designSystems'
 
 /** What the server says about a component beyond the definition itself. */
 export interface ComponentInfo {
@@ -495,6 +496,29 @@ export const api = {
     }),
   deleteSkill: (handle: string, workspaceId?: string) =>
     req<{ ok: true }>(`/api/skills/${encodeURIComponent(handle)}${agentScope(workspaceId)}`, { method: 'DELETE' }),
+  /** hosted design systems (real component bundles served at /ds/<name>/latest) */
+  listDesignSystems: (workspaceId?: string) =>
+    req<DesignSystemSummary[]>(
+      workspaceId ? `/api/design-systems?workspace=${encodeURIComponent(workspaceId)}` : '/api/design-systems',
+    ),
+  getDesignSystem: (name: string) => req<DesignSystemDetail>(`/api/design-systems/${encodeURIComponent(name)}`),
+  rollbackDesignSystem: (name: string, version: string) =>
+    req<{ ok: true; designSystem: DesignSystemSummary }>(`/api/design-systems/${encodeURIComponent(name)}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({ version }),
+    }),
+  updateDesignSystemMeta: (
+    name: string,
+    patch: { displayName?: string; description?: string; guideMarkdown?: string },
+  ) =>
+    req<{ ok: true; designSystem: DesignSystemSummary }>(`/api/design-systems/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  deleteDesignSystemRelease: (name: string, version: string) =>
+    req<{ ok: true }>(`/api/design-systems/${encodeURIComponent(name)}/releases/${encodeURIComponent(version)}`, {
+      method: 'DELETE',
+    }),
   /** a canvas's team (the built-in agents it has on, then its custom ones) */
   canvasTeam: (canvasId: string) => req<AgentRole[]>(`/api/canvases/${canvasId}/agents`),
   listBuiltInAgents: (workspaceId?: string) => req<BuiltInAgent[]>(`/api/agents/builtin${agentScope(workspaceId)}`),

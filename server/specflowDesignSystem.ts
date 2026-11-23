@@ -3,40 +3,38 @@ import { createRequire } from 'node:module'
 import { gzipSync } from 'node:zlib'
 import type { Request, Response } from 'express'
 import { env } from './env.ts'
+import {
+  getRegisteredDesignSystem,
+  getRegisteredRelease,
+  onDesignSystemChanged,
+  readBuiltinRuntimeAsset,
+  readRegisteredAsset,
+} from './designSystemRegistry.ts'
+import { mimeForDsFile, type DesignSystemManifest } from '../shared/designSystems.ts'
 
 /**
- * Self-hosted SpecFlow Design System runtime for Doop:
- * 1. Same-origin reverse proxy `/ds/*` backed by GCS with in-memory gzip caching and CORS `*`
- *    so sandboxed canvas iframes (`sandbox="allow-scripts"`, opaque origin `null`) load real
- *    components from Doop's own origin without third-party domain dependencies.
+ * Self-hosted Multi-Design-System Runtime & Static Host for Doop:
+ * 1. Same-origin `/ds/*` static host:
+ *    - `/ds/_runtime/*`: built-in shared runtimes (React 18.3.1 UMD from node_modules)
+ *      so sandboxed frames AND server-side Chromium screenshots (`guardPublicPageRequests`)
+ *      work reliably with zero external CDN dependencies.
+ *    - `/ds/<name>/<version|latest>/*`: served from Doop's first-class Design System Registry
+ *      (PostgreSQL metadata + `server/storage.ts`) with in-memory gzip LRU caching, CORS `*`,
+ *      CORP `cross-origin`, ETag/304, and instant cache eviction on publish/rollback.
+ *    - Transparent upstream proxy fallback (`DOOP_DS_UPSTREAM_BASE`) for legacy externally
+ *      hosted design systems (e.g. SpecFlow in Azure Blob) not yet migrated to the registry.
  * 2. Server-side JSX -> ES2020 JS compilation via esbuild + FRAME_BOOTSTRAP-safe real-component
- *    HTML shell (`create_specflow_frame` / `update_specflow_frame`).
- * 3. Live design-system catalog reader (`get_design_system`) for `index.d.ts` & `tokens.json`.
+ *    HTML shell (`create_ds_frame` / `update_ds_frame` and legacy `create_specflow_frame`).
+ * 3. Live design-system catalog reader (`get_design_system`) supporting `overview`, `components`,
+ *    `tokens` (with automatic `tokens.css` CSS variable parsing fallback), and `guide`.
  */
 
 const DEFAULT_UPSTREAM_BASE = 'https://storage.googleapis.com/specflow-design-systems-2611/ds'
 const LATEST_TTL_MS = 60_000
 const PINNED_TTL_MS = 3_600_000
-const MAX_CACHE_ENTRIES = 64
+const MAX_CACHE_ENTRIES = 128
 const FETCH_TIMEOUT_MS = 20_000
-const MAX_ASSET_BYTES = 25 * 1024 * 1024
-
-const MIME_BY_EXT: Record<string, { type: string; compress: boolean }> = {
-  '.js': { type: 'application/javascript; charset=utf-8', compress: true },
-  '.mjs': { type: 'application/javascript; charset=utf-8', compress: true },
-  '.css': { type: 'text/css; charset=utf-8', compress: true },
-  '.json': { type: 'application/json; charset=utf-8', compress: true },
-  '.ts': { type: 'text/plain; charset=utf-8', compress: true },
-  '.md': { type: 'text/markdown; charset=utf-8', compress: true },
-  '.txt': { type: 'text/plain; charset=utf-8', compress: true },
-  '.svg': { type: 'image/svg+xml; charset=utf-8', compress: true },
-  '.woff2': { type: 'font/woff2', compress: false },
-  '.woff': { type: 'font/woff', compress: false },
-  '.png': { type: 'image/png', compress: false },
-  '.jpg': { type: 'image/jpeg', compress: false },
-  '.jpeg': { type: 'image/jpeg', compress: false },
-  '.webp': { type: 'image/webp', compress: false },
-}
+const MAX_UPSTREAM_ASSET_BYTES = 25 * 1024 * 1024
 
 interface CachedAsset {
   raw: Buffer
@@ -49,6 +47,21 @@ interface CachedAsset {
 
 const assetCache = new Map<string, CachedAsset>()
 
+export function invalidateDesignSystemCache(name?: string): void {
+  if (!name) {
+    assetCache.clear()
+    return
+  }
+  const prefix = `${name}/`
+  for (const key of [...assetCache.keys()]) {
+    if (key.startsWith(prefix)) assetCache.delete(key)
+  }
+}
+
+onDesignSystemChanged((name) => {
+  invalidateDesignSystemCache(name)
+})
+
 export function dsUpstreamBase(): string {
   return (env.DOOP_DS_UPSTREAM_BASE || DEFAULT_UPSTREAM_BASE).replace(/\/+$/, '')
 }
@@ -57,9 +70,9 @@ export function defaultDsName(): string {
   return (env.DOOP_DS_NAME || 'specflow').replace(/[^a-z0-9_-]/gi, '') || 'specflow'
 }
 
-export function defaultDsBaseUrl(dsName = defaultDsName()): string {
+export function defaultDsBaseUrl(dsName = defaultDsName(), version = 'latest'): string {
   const origin = new URL(env.BETTER_AUTH_URL).origin
-  return `${origin}/ds/${dsName}/latest`
+  return `${origin}/ds/${dsName}/${version}`
 }
 
 function trustedAssetPrefixes(): string[] {
@@ -67,8 +80,8 @@ function trustedAssetPrefixes(): string[] {
   return [`${origin}/ds/`, ...env.DOOP_TRUSTED_ASSET_PREFIXES]
 }
 
-export function validateDsBaseUrl(raw?: string): string {
-  const candidate = (raw?.trim() || defaultDsBaseUrl()).replace(/\/+$/, '')
+export function validateDsBaseUrl(raw?: string, dsName = defaultDsName(), version = 'latest'): string {
+  const candidate = (raw?.trim() || defaultDsBaseUrl(dsName, version)).replace(/\/+$/, '')
   let parsed: URL
   try {
     parsed = new URL(candidate)
@@ -92,27 +105,64 @@ function sanitizeSubpath(raw: string): string | null {
   return trimmed
 }
 
-function mimeFor(subpath: string): { type: string; compress: boolean } | null {
-  const lower = subpath.toLowerCase()
-  for (const [ext, info] of Object.entries(MIME_BY_EXT)) {
-    if (lower.endsWith(ext)) return info
+function putInCache(key: string, entry: CachedAsset): CachedAsset {
+  if (assetCache.size >= MAX_CACHE_ENTRIES) {
+    const oldestKey = assetCache.keys().next().value
+    if (oldestKey) assetCache.delete(oldestKey)
   }
-  return null
+  assetCache.set(key, entry)
+  return entry
 }
 
-async function fetchUpstreamAsset(subpath: string): Promise<CachedAsset | null> {
+function buildCachedEntry(
+  raw: Buffer,
+  contentType: string,
+  compress: boolean,
+  isLatest: boolean,
+  now: number,
+): CachedAsset {
+  const gzip = compress ? gzipSync(raw, { level: 6 }) : undefined
+  const etag = `"${createHash('sha1').update(raw).digest('hex').slice(0, 16)}"`
+  const ttlMs = isLatest ? LATEST_TTL_MS : PINNED_TTL_MS
+  const cacheControl = isLatest
+    ? 'public, max-age=60, stale-while-revalidate=30'
+    : 'public, max-age=31536000, immutable'
+  return { raw, gzip, contentType, etag, cacheControl, expiresAt: now + ttlMs }
+}
+
+async function resolveAsset(subpath: string): Promise<CachedAsset | null> {
   const now = Date.now()
   const hit = assetCache.get(subpath)
   if (hit && hit.expiresAt > now) {
-    // Refresh insertion order for simple LRU behavior
     assetCache.delete(subpath)
     assetCache.set(subpath, hit)
     return hit
   }
 
-  const mime = mimeFor(subpath)
+  // 1. Built-in same-origin shared runtimes (/ds/_runtime/...)
+  if (subpath.startsWith('_runtime/')) {
+    const runtimeRel = subpath.slice('_runtime/'.length)
+    const runtime = await readBuiltinRuntimeAsset(runtimeRel)
+    if (!runtime) return null
+    return putInCache(subpath, buildCachedEntry(runtime.buffer, runtime.contentType, true, false, now))
+  }
+
+  const mime = mimeForDsFile(subpath)
   if (!mime) return null
 
+  // 2. First-class Design System Registry (<name>/<version|latest>/<relpath>)
+  const parts = subpath.split('/')
+  if (parts.length >= 3) {
+    const [dsName, versionOrLatest, ...rest] = parts
+    const relPath = rest.join('/')
+    if (dsName && versionOrLatest && relPath && getRegisteredDesignSystem(dsName)) {
+      const reg = await readRegisteredAsset(dsName, versionOrLatest, relPath)
+      if (!reg) return null
+      return putInCache(subpath, buildCachedEntry(reg.buffer, reg.contentType, reg.compress, reg.isLatest, now))
+    }
+  }
+
+  // 3. Read-through fallback to legacy upstream (e.g. externally hosted SpecFlow in Azure Blob / GCS)
   const upstreamUrl = `${dsUpstreamBase()}/${subpath}`
   const res = await fetch(upstreamUrl, {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
@@ -122,33 +172,15 @@ async function fetchUpstreamAsset(subpath: string): Promise<CachedAsset | null> 
   if (!res.ok) throw new Error(`Upstream DS fetch failed (${res.status}) for ${subpath}`)
 
   const arr = await res.arrayBuffer()
-  if (arr.byteLength > MAX_ASSET_BYTES) {
+  if (arr.byteLength > MAX_UPSTREAM_ASSET_BYTES) {
     throw new Error(`Upstream DS asset exceeds size cap: ${subpath}`)
   }
   const raw = Buffer.from(arr)
-  const gzip = mime.compress ? gzipSync(raw, { level: 6 }) : undefined
-  const etag = `"${createHash('sha1').update(raw).digest('hex').slice(0, 16)}"`
   const isLatest = subpath.includes('/latest/')
-  const ttlMs = isLatest ? LATEST_TTL_MS : PINNED_TTL_MS
-  const cacheControl = isLatest ? 'public, max-age=60' : 'public, max-age=31536000, immutable'
-
-  const entry: CachedAsset = {
-    raw,
-    gzip,
-    contentType: mime.type,
-    etag,
-    cacheControl,
-    expiresAt: now + ttlMs,
-  }
-  if (assetCache.size >= MAX_CACHE_ENTRIES) {
-    const oldestKey = assetCache.keys().next().value
-    if (oldestKey) assetCache.delete(oldestKey)
-  }
-  assetCache.set(subpath, entry)
-  return entry
+  return putInCache(subpath, buildCachedEntry(raw, mime.type, mime.compress, isLatest, now))
 }
 
-/** Express handler for GET /ds/* (and OPTIONS /ds/*). */
+/** Express handler for GET /ds/* (and HEAD / OPTIONS /ds/*). */
 export async function serveDesignSystemAsset(req: Request, res: Response): Promise<void> {
   res.set('Access-Control-Allow-Origin', '*')
   res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
@@ -160,6 +192,10 @@ export async function serveDesignSystemAsset(req: Request, res: Response): Promi
     res.status(204).end()
     return
   }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.status(405).json({ error: 'method not allowed' })
+    return
+  }
 
   const wildcard = (req.params as Record<string, string | undefined>)['0'] ?? ''
   const subpath = sanitizeSubpath(wildcard)
@@ -169,7 +205,7 @@ export async function serveDesignSystemAsset(req: Request, res: Response): Promi
   }
 
   try {
-    const asset = await fetchUpstreamAsset(subpath)
+    const asset = await resolveAsset(subpath)
     if (!asset) {
       res.status(404).end()
       return
@@ -257,50 +293,159 @@ export async function compileSpecFlowJsx(jsxSource: string, title = 'artboard'):
   return result.code
 }
 
-export interface WrapSpecFlowOptions {
+function fallbackManifestFor(dsName: string): DesignSystemManifest {
+  if (dsName === 'gonovus') {
+    return {
+      displayName: 'GoNovus Design System',
+      runtime: {
+        preset: 'react-18-umd',
+        globalName: 'GoNovusA',
+        stylesheets: ['tokens.css', 'components/bundle.css'],
+        scripts: ['components/bundle.js'],
+        bodyCss:
+          'background: var(--bg-surface-base, var(--background, #ffffff)); color: var(--text-primary, var(--foreground, #111111)); font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Noto Sans CJK SC", "PingFang SC", sans-serif); -webkit-font-smoothing: antialiased;',
+        darkClass: 'dark',
+        themeAttr: 'data-theme',
+      },
+      docs: {
+        tokensCssPath: 'tokens.css',
+        dtsPath: 'components/index.d.ts',
+        tokensJsonPath: 'tokens.json',
+      },
+    }
+  }
+  return {
+    displayName: 'SpecFlow Design System',
+    runtime: {
+      preset: 'react-19-bundle',
+      globalName: 'SpecFlow',
+      extraGlobals: { Lucide: 'LucideReact' },
+      stylesheets: ['tokens.css', 'components/bundle.css'],
+      scripts: ['runtime/react-runtime.js', 'components/bundle.js'],
+      bodyCss:
+        'background: var(--background); color: var(--foreground); font-family: "Geist Variable", "Geist", "Noto Sans CJK SC", "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif; -webkit-font-smoothing: antialiased;',
+      darkClass: 'dark',
+      themeAttr: 'data-theme',
+    },
+    docs: {
+      dtsPath: 'components/index.d.ts',
+      tokensJsonPath: 'tokens.json',
+      tokensCssPath: 'tokens.css',
+      conventionsPath: 'conventions.md',
+    },
+  }
+}
+
+function resolveManifestFor(dsName: string, version = 'latest'): DesignSystemManifest {
+  const rel = getRegisteredRelease(dsName, version)
+  if (rel) return rel.manifest
+  const ds = getRegisteredDesignSystem(dsName)
+  if (ds) return ds.manifest
+  return fallbackManifestFor(dsName)
+}
+
+export interface WrapDesignSystemOptions {
+  dsName?: string
+  dsVersion?: string
   theme?: 'light' | 'dark'
   title?: string
   extraCss?: string
   dsBaseUrl?: string
 }
 
+export type WrapSpecFlowOptions = WrapDesignSystemOptions
+
 /**
  * Compile pure React JSX (defining `function App()` or `function Artboard()`) into a
  * complete Doop FRAME_BOOTSTRAP-compatible HTML document that renders real components
- * from `window.SpecFlow` + React 19 runtime over same-origin `/ds/*`.
+ * from any hosted Design System over same-origin `/ds/*`.
  */
-export async function wrapSpecFlowJsxHtml(jsxSource: string, opts: WrapSpecFlowOptions = {}): Promise<string> {
+export async function wrapDesignSystemJsxHtml(jsxSource: string, opts: WrapDesignSystemOptions = {}): Promise<string> {
+  const dsName = (opts.dsName || defaultDsName()).replace(/[^a-z0-9_-]/gi, '').toLowerCase() || defaultDsName()
+  const dsVersion = opts.dsVersion?.trim() || 'latest'
+  const manifest = resolveManifestFor(dsName, dsVersion)
   const theme = opts.theme === 'dark' ? 'dark' : 'light'
   const isDark = theme === 'dark'
-  const title = opts.title || 'SpecFlow Artboard'
+  const title = opts.title || `${manifest.displayName || dsName} Artboard`
   const extraCss = opts.extraCss || ''
-  const dsBaseUrl = validateDsBaseUrl(opts.dsBaseUrl)
+  const dsBaseUrl = validateDsBaseUrl(opts.dsBaseUrl, dsName, dsVersion)
+  const origin = new URL(env.BETTER_AUTH_URL).origin
   const escapedTitle = title.replace(
     /[<>&"]/g,
     (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c] ?? c,
   )
   const compiledJs = (await compileSpecFlowJsx(jsxSource, title)).replace(/<\/script/gi, '<\\/script')
-  const runtimeUrl = `${dsBaseUrl}/runtime/react-runtime.js`
-  const bundleUrl = `${dsBaseUrl}/components/bundle.js`
+
+  const scriptSteps: Array<{ url: string; checkExpr: string }> = []
+  if (manifest.runtime.preset === 'react-18-umd') {
+    scriptSteps.push(
+      { url: `${origin}/ds/_runtime/react-18/react.production.min.js`, checkExpr: 'Boolean(window.React)' },
+      { url: `${origin}/ds/_runtime/react-18/react-dom.production.min.js`, checkExpr: 'Boolean(window.ReactDOM)' },
+    )
+  }
+  const bundleScripts = manifest.runtime.scripts
+  for (let i = 0; i < bundleScripts.length; i++) {
+    const rel = bundleScripts[i]!
+    const url = `${dsBaseUrl}/${rel}`
+    let checkExpr = 'true'
+    if (rel.endsWith('react-runtime.js')) {
+      checkExpr = 'Boolean(window.React && window.ReactDOM)'
+    } else if (i === bundleScripts.length - 1 && manifest.runtime.globalName) {
+      checkExpr = `Boolean(window[${JSON.stringify(manifest.runtime.globalName)}])`
+    }
+    scriptSteps.push({ url, checkExpr })
+  }
+
+  const preloadLinks = scriptSteps
+    .map((s) => `  <link rel="preload" as="script" href="${s.url}" crossorigin="anonymous" />`)
+    .join('\n')
+  const stylesheetLinks = manifest.runtime.stylesheets
+    .map((rel) => `  <link rel="stylesheet" href="${dsBaseUrl}/${rel}" />`)
+    .join('\n')
+
+  const globalBindings: string[] = []
+  if (manifest.runtime.globalName) {
+    const g = manifest.runtime.globalName
+    globalBindings.push(`        const ${g} = window[${JSON.stringify(g)}] || {};`)
+  }
+  if (manifest.runtime.extraGlobals) {
+    for (const [ident, winKey] of Object.entries(manifest.runtime.extraGlobals)) {
+      if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(ident)) {
+        globalBindings.push(`        const ${ident} = window[${JSON.stringify(winKey)}] || {};`)
+      }
+    }
+  }
+
+  const bodyCss =
+    manifest.runtime.bodyCss ||
+    'background: var(--background, var(--bg-surface-base, #ffffff)); color: var(--foreground, var(--text-primary, #111111)); font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Noto Sans CJK SC", "PingFang SC", sans-serif); -webkit-font-smoothing: antialiased;'
+  const darkClass = manifest.runtime.darkClass || 'dark'
+  const themeAttr = manifest.runtime.themeAttr || 'data-theme'
+
+  const loadChainCode = scriptSteps.length
+    ? scriptSteps
+        .map((s, idx) =>
+          idx === 0
+            ? `      loadScriptOnce(${JSON.stringify(s.url)}, () => ${s.checkExpr})`
+            : `        .then(() => loadScriptOnce(${JSON.stringify(s.url)}, () => ${s.checkExpr}))`,
+        )
+        .join('\n') +
+      '\n        .then(mount)\n        .catch((err) => showErr(err && err.message ? err.message : String(err)));'
+    : '      mount();'
 
   return `<!DOCTYPE html>
-<html lang="zh-CN" class="${isDark ? 'dark' : ''}" data-theme="${theme}">
+<html lang="zh-CN" class="${isDark ? darkClass : ''}" ${themeAttr}="${theme}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapedTitle}</title>
-  <link rel="preload" as="script" href="${runtimeUrl}" crossorigin="anonymous" />
-  <link rel="preload" as="script" href="${bundleUrl}" crossorigin="anonymous" />
-  <link rel="stylesheet" href="${dsBaseUrl}/tokens.css" />
-  <link rel="stylesheet" href="${dsBaseUrl}/components/bundle.css" />
+${preloadLinks}
+${stylesheetLinks}
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     html, body, #root { margin: 0; padding: 0; width: 100%; min-height: 100%; }
     body {
-      background: var(--background);
-      color: var(--foreground);
-      font-family: "Geist Variable", "Geist", "Noto Sans CJK SC", "PingFang SC", -apple-system, BlinkMacSystemFont, sans-serif;
-      -webkit-font-smoothing: antialiased;
+      ${bodyCss}
     }
     ${extraCss}
   </style>
@@ -348,8 +493,7 @@ export async function wrapSpecFlowJsxHtml(jsxSource: string, opts: WrapSpecFlowO
       const runFactory = () => {
         const React = window.React;
         const { useState, useEffect, useMemo, useRef, Fragment } = React;
-        const SpecFlow = window.SpecFlow || {};
-        const Lucide = window.LucideReact || {};
+${globalBindings.join('\n')}
 
 ${compiledJs}
 
@@ -432,14 +576,15 @@ ${compiledJs}
         }
       };
 
-      loadScriptOnce(${JSON.stringify(runtimeUrl)}, () => Boolean(window.React && window.ReactDOM))
-        .then(() => loadScriptOnce(${JSON.stringify(bundleUrl)}, () => Boolean(window.SpecFlow)))
-        .then(mount)
-        .catch((err) => showErr(err && err.message ? err.message : String(err)));
+${loadChainCode}
     })();
   </script>
 </body>
 </html>`
+}
+
+export async function wrapSpecFlowJsxHtml(jsxSource: string, opts: WrapSpecFlowOptions = {}): Promise<string> {
+  return wrapDesignSystemJsxHtml(jsxSource, { ...opts, dsName: opts.dsName ?? 'specflow' })
 }
 
 function extractExportedSymbols(dts: string): string[] {
@@ -486,78 +631,195 @@ function extractMatchingDtsSections(dts: string, queries: string[], maxChars = 2
   return matched.join('\n\n')
 }
 
+function extractCssCustomProperties(css: string): Record<string, string> {
+  const tokens: Record<string, string> = {}
+  for (const m of css.matchAll(/(--[a-zA-Z0-9_-]+)\s*:\s*([^;{}]+);/g)) {
+    const k = m[1]?.trim()
+    const v = m[2]?.trim()
+    if (k && v && !(k in tokens)) tokens[k] = v
+  }
+  return tokens
+}
+
 export async function getDesignSystemCatalog(opts: {
-  section?: 'overview' | 'components' | 'tokens'
+  section?: 'overview' | 'components' | 'tokens' | 'guide'
   query?: string
   dsName?: string
+  dsVersion?: string
 }): Promise<Record<string, unknown>> {
-  const dsName = (opts.dsName || defaultDsName()).replace(/[^a-z0-9_-]/gi, '') || defaultDsName()
+  const dsName = (opts.dsName || defaultDsName()).replace(/[^a-z0-9_-]/gi, '').toLowerCase() || defaultDsName()
+  const version = opts.dsVersion?.trim() || 'latest'
   const section = opts.section || 'overview'
-  const baseUrl = defaultDsBaseUrl(dsName)
+  const baseUrl = defaultDsBaseUrl(dsName, version)
+  const manifest = resolveManifestFor(dsName, version)
+  const registered = getRegisteredDesignSystem(dsName)
+  const release = getRegisteredRelease(dsName, version)
+
+  if (section === 'guide') {
+    if (manifest.docs?.guideMarkdown) {
+      return { dsName, version: release?.version ?? version, baseUrl, section, guide: manifest.docs.guideMarkdown }
+    }
+    const convPath = manifest.docs?.conventionsPath || 'conventions.md'
+    const convAsset = await resolveAsset(`${dsName}/${version}/${convPath}`)
+    if (convAsset) {
+      return {
+        dsName,
+        version: release?.version ?? version,
+        baseUrl,
+        section,
+        guide: convAsset.raw.toString('utf8'),
+      }
+    }
+    return {
+      dsName,
+      version: release?.version ?? version,
+      baseUrl,
+      section,
+      guide: null,
+      note: `No custom guideMarkdown or conventions.md stored for "${dsName}". Check get_guide({ topic: "${dsName}-components" }) or inspect runtime manifest in section="overview".`,
+    }
+  }
 
   if (section === 'tokens') {
-    const tokAsset = await fetchUpstreamAsset(`${dsName}/latest/tokens.json`)
-    if (!tokAsset) throw new Error(`tokens.json not found for design system "${dsName}"`)
-    const tokensText = tokAsset.raw.toString('utf8')
-    const parsed = JSON.parse(tokensText) as Record<string, unknown>
+    const tokJsonPath = manifest.docs?.tokensJsonPath || 'tokens.json'
+    const tokAsset = await resolveAsset(`${dsName}/${version}/${tokJsonPath}`)
+    if (tokAsset) {
+      const parsed = JSON.parse(tokAsset.raw.toString('utf8')) as Record<string, unknown>
+      if (!opts.query?.trim()) {
+        return { dsName, version: release?.version ?? version, baseUrl, section, source: tokJsonPath, tokens: parsed }
+      }
+      const terms = opts.query
+        .split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean)
+      const filtered: Record<string, unknown> = {}
+      const walk = (obj: unknown, prefix = '') => {
+        if (!obj || typeof obj !== 'object') return
+        for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+          const keyPath = prefix ? `${prefix}.${k}` : k
+          if (terms.some((t) => keyPath.toLowerCase().includes(t))) {
+            filtered[keyPath] = v
+          } else if (v && typeof v === 'object' && !Array.isArray(v)) {
+            walk(v, keyPath)
+          }
+        }
+      }
+      walk(parsed)
+      return { dsName, version: release?.version ?? version, baseUrl, section, query: opts.query, matches: filtered }
+    }
+
+    // Fallback: parse CSS custom properties directly from tokens.css
+    const tokCssPath = manifest.docs?.tokensCssPath || 'tokens.css'
+    const cssAsset = await resolveAsset(`${dsName}/${version}/${tokCssPath}`)
+    if (!cssAsset) throw new Error(`Neither ${tokJsonPath} nor ${tokCssPath} found for design system "${dsName}"`)
+    const cssTokens = extractCssCustomProperties(cssAsset.raw.toString('utf8'))
     if (!opts.query?.trim()) {
-      return { dsName, baseUrl, section, tokens: parsed }
+      return {
+        dsName,
+        version: release?.version ?? version,
+        baseUrl,
+        section,
+        source: tokCssPath,
+        tokenCount: Object.keys(cssTokens).length,
+        tokens: cssTokens,
+      }
     }
     const terms = opts.query
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean)
-    const filtered: Record<string, unknown> = {}
-    const walk = (obj: unknown, prefix = '') => {
-      if (!obj || typeof obj !== 'object') return
-      for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-        const keyPath = prefix ? `${prefix}.${k}` : k
-        if (terms.some((t) => keyPath.toLowerCase().includes(t))) {
-          filtered[keyPath] = v
-        } else if (v && typeof v === 'object' && !Array.isArray(v)) {
-          walk(v, keyPath)
-        }
+    const matches: Record<string, string> = {}
+    for (const [k, v] of Object.entries(cssTokens)) {
+      if (terms.some((t) => k.toLowerCase().includes(t) || v.toLowerCase().includes(t))) {
+        matches[k] = v
       }
     }
-    walk(parsed)
-    return { dsName, baseUrl, section, query: opts.query, matches: filtered }
-  }
-
-  const dtsAsset = await fetchUpstreamAsset(`${dsName}/latest/components/index.d.ts`)
-  if (!dtsAsset) throw new Error(`components/index.d.ts not found for design system "${dsName}"`)
-  const dts = dtsAsset.raw.toString('utf8')
-  const symbols = extractExportedSymbols(dts)
-
-  if (section === 'components') {
-    const queries = (opts.query || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-    const declarations = extractMatchingDtsSections(dts, queries)
     return {
       dsName,
+      version: release?.version ?? version,
       baseUrl,
       section,
-      query: opts.query || '*',
-      totalExports: symbols.length,
-      declarations:
-        declarations || 'No matching component declarations found. Check section="overview" for exact export names.',
+      source: tokCssPath,
+      query: opts.query,
+      matches,
+    }
+  }
+
+  const dtsPath = manifest.docs?.dtsPath || 'components/index.d.ts'
+  const dtsAsset = await resolveAsset(`${dsName}/${version}/${dtsPath}`)
+  const dts = dtsAsset ? dtsAsset.raw.toString('utf8') : null
+  const symbols = dts ? extractExportedSymbols(dts) : []
+
+  if (section === 'components') {
+    if (dts) {
+      const queries = (opts.query || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      const declarations = extractMatchingDtsSections(dts, queries)
+      return {
+        dsName,
+        version: release?.version ?? version,
+        baseUrl,
+        section,
+        query: opts.query || '*',
+        totalExports: symbols.length,
+        declarations:
+          declarations || 'No matching component declarations found. Check section="overview" for exact export names.',
+      }
+    }
+    const catPath = manifest.docs?.catalogPath || 'catalog.json'
+    const catAsset = await resolveAsset(`${dsName}/${version}/${catPath}`)
+    if (catAsset) {
+      return {
+        dsName,
+        version: release?.version ?? version,
+        baseUrl,
+        section,
+        source: catPath,
+        catalog: JSON.parse(catAsset.raw.toString('utf8')) as unknown,
+      }
+    }
+    return {
+      dsName,
+      version: release?.version ?? version,
+      baseUrl,
+      section,
+      globalName: manifest.runtime.globalName,
+      note: `No ${dtsPath} or ${catPath} uploaded for "${dsName}" yet. Load section="guide" or get_guide({ topic: "${dsName}-components" }) for component usage, or include components/index.d.ts in the next publish_design_system_bundle release.`,
     }
   }
 
   // overview
-  const tokAsset = await fetchUpstreamAsset(`${dsName}/latest/tokens.json`)
+  const tokAsset = await resolveAsset(`${dsName}/${version}/${manifest.docs?.tokensJsonPath || 'tokens.json'}`)
   const tokenGroups = tokAsset ? Object.keys(JSON.parse(tokAsset.raw.toString('utf8')) as Record<string, unknown>) : []
+  const origin = new URL(env.BETTER_AUTH_URL).origin
+  const runtimeScripts = [
+    ...(manifest.runtime.preset === 'react-18-umd'
+      ? [
+          `${origin}/ds/_runtime/react-18/react.production.min.js`,
+          `${origin}/ds/_runtime/react-18/react-dom.production.min.js`,
+        ]
+      : []),
+    ...manifest.runtime.scripts.map((s) => `${baseUrl}/${s}`),
+  ]
+  const stylesheets = manifest.runtime.stylesheets.map((s) => `${baseUrl}/${s}`)
+
   return {
     dsName,
+    displayName: manifest.displayName || dsName,
+    version: release?.version ?? version,
+    latestVersion: registered?.latestVersion ?? 'upstream',
     baseUrl,
     section: 'overview',
-    runtime:
-      'React 19 + ReactDOM + LucideReact + window.SpecFlow (auto-loaded by create_specflow_frame / update_specflow_frame)',
+    globalName: manifest.runtime.globalName,
+    runtimePreset: manifest.runtime.preset,
+    stylesheets,
+    scripts: runtimeScripts,
+    files: release?.files.map((f) => ({ path: f.path, bytes: f.bytes, contentType: f.contentType })) ?? undefined,
     totalExports: symbols.length,
     exportedSymbols: symbols,
     tokenGroups,
-    usage:
-      'Call get_design_system({ section: "components", query: "Button,Dialog,StatusIndicator" }) to inspect exact TypeScript props before writing JSX, then call create_specflow_frame or update_specflow_frame with pure JSX defining function App(). Never invent non-existent SpecFlow.* exports.',
+    usage: `Use create_ds_frame({ ds_name: "${dsName}", jsx }) to render real window.${manifest.runtime.globalName || dsName} components, or load stylesheets & scripts above directly in frame HTML.`,
   }
 }

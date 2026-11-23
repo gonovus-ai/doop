@@ -119,6 +119,12 @@ import * as backgrounds from './backgrounds.ts'
 import { serveIcon } from './iconProxy.ts'
 import { servePhoto } from './photoProxy.ts'
 import { serveDesignSystemAsset } from './specflowDesignSystem.ts'
+import { hydrateDesignSystems } from './designSystemRegistry.ts'
+import {
+  designSystemsRouter,
+  handleDesignSystemTicketCommit,
+  handleDesignSystemTicketPut,
+} from './designSystemRoutes.ts'
 import * as storage from './storage.ts'
 import * as github from './github.ts'
 import * as githubApp from './githubApp.ts'
@@ -194,6 +200,7 @@ await hydrateInstanceSettings() // the sign-in policy, read on every signup
 await webhooks.hydrateWebhooks()
 await hydrateFonts() // before the first request: frame writes add the faces they use
 await hydrateLibraries() // and the workspace library components they name
+await hydrateDesignSystems() // hosted design systems served at /ds/<name>/<version|latest>/*
 billing.reportBillingConfig()
 actions.hydrateLogs(data)
 seed()
@@ -657,8 +664,13 @@ app.get('/bg/:file', async (req, res) => {
 app.get('/icons/iconify/:prefix/:file', (req, res) => void serveIcon(req, res))
 /* search_images' photos from Doop's origin (server/photoProxy.ts) */
 app.get('/photos/pexels/:file', (req, res) => void servePhoto(req, res))
-/* SpecFlow real-component design system bundle from Doop's origin (server/specflowDesignSystem.ts) */
+/* Hosted design system bundles & built-in shared runtimes (/ds/_runtime/*, /ds/<name>/<ver|latest>/*) */
 app.all('/ds/*', (req, res) => void serveDesignSystemAsset(req, res))
+
+/* Staged one-time Design System uploads (before express.json: raw streaming file bytes,
+   5 MB/file cap, atomic commit switches latest + evicts LRU cache). */
+app.post('/ds-upload/:token/commit', (req, res) => void handleDesignSystemTicketCommit(req, res))
+app.put('/ds-upload/:token/*', (req, res) => void handleDesignSystemTicketPut(req, res))
 
 /* ------------------------------------------------------------------ */
 /* One-time asset uploads: the upload_asset MCP tool mints a ticket and */
@@ -891,6 +903,8 @@ declare global {
    the gate looks at that session (shared/desktopConnect.ts) */
 app.get('/api/integrations/:provider/callback', relayDesktopCallback)
 app.use('/api/live-activities', logLiveActivityRequests)
+/* Design System Registry API: accepts either browser session cookie or Agent Key Bearer token (for CI/CLI). */
+app.use('/api/design-systems', designSystemsRouter)
 app.use('/api', async (req, res, next) => {
   try {
     const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) })

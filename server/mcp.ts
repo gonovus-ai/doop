@@ -124,7 +124,17 @@ import { usageByComponent } from './componentUsage.ts'
 import type { AgentScope } from '../shared/customAgents.ts'
 import { parseSkillInput } from '../shared/skills.ts'
 import { createSkill, listSkills as listStoredSkills, SkillInputError, skillsForCanvas, updateSkill } from './skills.ts'
-import { getDesignSystemCatalog, wrapSpecFlowJsxHtml } from './specflowDesignSystem.ts'
+import { getDesignSystemCatalog, wrapDesignSystemJsxHtml, wrapSpecFlowJsxHtml } from './specflowDesignSystem.ts'
+import {
+  createPublishTicket,
+  DesignSystemError,
+  getRegisteredDesignSystem,
+  listDesignSystemsForUser,
+  publishRelease,
+  rollbackDesignSystem,
+  type PublishFileInput,
+} from './designSystemRegistry.ts'
+import { DS_MAX_FILE_BYTES, type PartialManifestInput } from '../shared/designSystems.ts'
 
 /* What every agent gets in the handshake. Claude Code cuts server instructions at 4,096
    characters (older versions at 2,048) and ChatGPT reads the first 512 most, so this is the
@@ -132,18 +142,18 @@ import { getDesignSystemCatalog, wrapSpecFlowJsxHtml } from './specflowDesignSys
    get_guide (tests/mcpInstructions.test.ts holds the budget). */
 export const INSTRUCTIONS = `Doop is a shared multiplayer design canvas: humans and AI agents design together in real time. Canvases hold frames, artboards that render complete HTML documents live for everyone viewing.
 
-You MUST call get_guide({ topic: "doop-instructions" }) before using other Doop tools, and again if a long conversation may have dropped it. It lists further topics (design-craft, review-pipeline, specflow-components, images, components, prototypes, redesigns…) to load when a task needs one.
+You MUST call get_guide({ topic: "doop-instructions" }) before using other Doop tools, and again if a long conversation may have dropped it. It lists further topics (design-craft, review-pipeline, specflow-components, gonovus-components, images, components, prototypes, redesigns…) to load when a task needs one.
 
-- Team Skills (Settings -> Skills): call list_skills (with canvas_id when working on a canvas) and get_skill for relevant handles BEFORE designing — they carry live team design rules editable in the UI.
-- Real-component SpecFlow UI: NEVER hand-draw fake copies of SpecFlow components. Load get_guide({ topic: "specflow-components" }), inspect real exports/props with get_design_system, and submit pure React JSX via create_specflow_frame / update_specflow_frame (server compiles JSX with esbuild and loads window.SpecFlow over same-origin /ds/specflow/latest).
-- Direction & Craft: load get_guide({ topic: "design-craft" }) for new/ambiguous work — clarify high-leverage forks or show 2–4 genuinely distinct direction artboards with honest tradeoffs before polishing.
+- Team Skills (Settings -> Skills): call list_skills and get_skill BEFORE designing — live team rules outrank defaults.
+- Hosted Design Systems (/ds/<name>/latest): NEVER hand-draw fake product UI. Call list_design_systems / get_design_system, load specflow-components or gonovus-components, and author JSX via create_ds_frame / update_ds_frame.
+- Direction & Craft: load design-craft for open briefs; explore distinct directions before polishing.
 - Call get_canvas before adding or editing frames. Pick one agent_name and pass it on every call; set_status says what you are working on.
 - HUMAN FEEDBACK blocks in tool results are requests from people on the canvas: handle them before your own plan.
 - Style guides: read the canvas's with get_guidelines before designing, and follow them.
-- After every create or significant edit, call get_frame_screenshot AND inspect_frame, run the 5-role review (get_guide review-pipeline), and fix what looks wrong.
-- Keep every data-doop-* attribute when you rewrite markup: comments, links and prototype wiring hang on them.
-- A request naming a site or URL: call import_webpage FIRST and design from what is there; view_website is only for read-only inspection.
-- Images come from search_images, search_icons, search_logos, upload_asset or generate_image. Never a base64 data: URI, a placeholder logo or an invented brand.
+- After every create or significant edit, call get_frame_screenshot AND inspect_frame, run review-pipeline, and fix issues.
+- Keep every data-doop-* attribute when rewriting markup: comments, links and prototype wiring hang on them.
+- A request naming a site or URL: call import_webpage FIRST; view_website is only for read-only inspection.
+- Images: search_images, search_icons, search_logos, upload_asset or generate_image. Never base64 data: URIs or placeholder logos.
 - Only ready_for_dev is human sign-off; never approve a frame unasked.
 - When Doop gets in your way, call report_issue, then carry on.`
 
@@ -700,27 +710,445 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
   )
 
   server.registerTool(
+    'list_design_systems',
+    {
+      title: 'List hosted Design Systems',
+      description:
+        'List all real-component Design Systems hosted on this Doop server (both workspace-published bundles in the Design System Registry and legacy upstream defaults), including their latest version, historical versions, global variable name, runtime preset, and same-origin /ds/<name>/latest base URL.',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        workspace_id: z.string().optional().describe('Optional workspace ID (must be a member)'),
+      },
+    },
+    async ({ workspace_id }) => {
+      try {
+        const registered = ownerId ? listDesignSystemsForUser(ownerId, workspace_id) : []
+        const origin = new URL(env.BETTER_AUTH_URL).origin
+        const hasSpecflow = registered.some((d) => d.name === 'specflow')
+        return text({
+          shared_runtimes: {
+            'react-18-umd': [
+              `${origin}/ds/_runtime/react-18/react.production.min.js`,
+              `${origin}/ds/_runtime/react-18/react-dom.production.min.js`,
+            ],
+          },
+          design_systems: registered,
+          ...(!hasSpecflow
+            ? {
+                legacy_upstream: [
+                  {
+                    name: 'specflow',
+                    latestBaseUrl: `${origin}/ds/specflow/latest`,
+                    globalName: 'SpecFlow',
+                    runtimePreset: 'react-19-bundle',
+                    note: 'Served via read-through upstream proxy until published to the local registry.',
+                  },
+                ],
+              }
+            : {}),
+        })
+      } catch (e) {
+        return err(
+          e instanceof DesignSystemError ? e.message : e instanceof Error ? e.message : 'failed to list design systems',
+        )
+      }
+    },
+  )
+
+  server.registerTool(
+    'publish_design_system_bundle',
+    {
+      title: 'Publish a versioned Design System bundle',
+      description:
+        'Publish a new immutable version of a hosted Design System (e.g. name="gonovus", version="0.1.0") to /ds/<name>/<version>/ and atomically point /ds/<name>/latest/ to it — no Doop redeploy needed. Workspace members only. Single file cap: 5 MB (release cap: 30 MB). Pick upload_mode="ticket" (RECOMMENDED for bundles with local files > 100KB such as bundle.js): returns a 15-minute staged upload URL and a ready-to-run curl command that streams files from disk and atomically commits without burning LLM tokens. Use upload_mode="inline" (or pass content/source_url inside files) for small files or environments without shell access.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      inputSchema: {
+        name: z.string().describe('Design system slug, e.g. "gonovus" or "specflow" (lowercase letters, digits, -, _)'),
+        version: z.string().describe('Immutable version tag, e.g. "0.1.0" or "2026.11.23-1" ("latest" is reserved)'),
+        workspace_id: z
+          .string()
+          .optional()
+          .describe(
+            'Workspace that owns this design system (auto-resolved if you belong to one workspace or DS already exists)',
+          ),
+        upload_mode: z
+          .enum(['ticket', 'inline'])
+          .optional()
+          .describe(
+            '"ticket" (recommended for large bundles like 530KB bundle.js) returns a curl upload + commit command; "inline" writes files directly from content/source_url',
+          ),
+        files: z
+          .array(
+            z.object({
+              path: z
+                .string()
+                .describe(
+                  'Relative path under /ds/<name>/<version>/, e.g. "tokens.css", "components/bundle.css", "components/bundle.js"',
+                ),
+              content: z
+                .string()
+                .optional()
+                .describe('Inline file text (or base64 when encoding="base64"); for upload_mode="inline"'),
+              source_url: z
+                .string()
+                .optional()
+                .describe('Public http(s) URL to fetch file bytes from; for upload_mode="inline"'),
+              encoding: z.enum(['utf8', 'base64']).optional().describe('Encoding for inline content (default "utf8")'),
+            }),
+          )
+          .optional()
+          .describe(
+            'List of files to publish. In ticket mode, only { path } entries are needed (e.g. tokens.css, components/bundle.css, components/bundle.js).',
+          ),
+        manifest: z
+          .object({
+            display_name: z.string().optional(),
+            description: z.string().optional(),
+            runtime_preset: z.enum(['react-18-umd', 'react-19-bundle', 'none']).optional(),
+            global_name: z
+              .string()
+              .optional()
+              .describe('Window global exposed by bundle.js, e.g. "GoNovusA" or "SpecFlow"'),
+            extra_globals: z.record(z.string()).optional(),
+            stylesheets: z.array(z.string()).optional(),
+            scripts: z.array(z.string()).optional(),
+            body_css: z.string().optional(),
+            guide_markdown: z
+              .string()
+              .optional()
+              .describe('Live Markdown usage guide returned by get_design_system({ section: "guide" })'),
+          })
+          .optional(),
+        notes: z.string().optional().describe('Optional release notes / changelog summary'),
+        overwrite: z
+          .boolean()
+          .optional()
+          .describe('Overwrite an existing version (default false — versions are immutable)'),
+      },
+    },
+    async ({ name, version, workspace_id, upload_mode, files, manifest, notes, overwrite }) => {
+      if (!ownerId) return err('authentication required — only workspace members may publish design systems')
+      const parsedManifest: PartialManifestInput | undefined = manifest
+        ? {
+            displayName: manifest.display_name,
+            description: manifest.description,
+            runtime: {
+              ...(manifest.runtime_preset !== undefined ? { preset: manifest.runtime_preset } : {}),
+              ...(manifest.global_name !== undefined ? { globalName: manifest.global_name } : {}),
+              ...(manifest.extra_globals !== undefined ? { extraGlobals: manifest.extra_globals } : {}),
+              ...(manifest.stylesheets !== undefined ? { stylesheets: manifest.stylesheets } : {}),
+              ...(manifest.scripts !== undefined ? { scripts: manifest.scripts } : {}),
+              ...(manifest.body_css !== undefined ? { bodyCss: manifest.body_css } : {}),
+            },
+            ...(manifest.guide_markdown !== undefined ? { docs: { guideMarkdown: manifest.guide_markdown } } : {}),
+          }
+        : undefined
+
+      const fileList = files ?? []
+      const hasInlinePayload = fileList.some((f) => f.content !== undefined || f.source_url !== undefined)
+      const effectiveMode = upload_mode ?? (hasInlinePayload ? 'inline' : 'ticket')
+
+      try {
+        if (effectiveMode === 'ticket') {
+          const ticket = createPublishTicket({
+            name,
+            version,
+            userId: ownerId,
+            workspaceId: workspace_id,
+            expectedFiles: fileList.map((f) => f.path),
+            manifest: parsedManifest,
+            notes,
+            overwrite,
+          })
+          return text({
+            ok: true,
+            mode: 'ticket',
+            name: ticket.name,
+            version: ticket.version,
+            workspace_id: ticket.workspaceId,
+            upload_base_url: ticket.uploadBaseUrl,
+            commit_url: ticket.commitUrl,
+            expected_files: ticket.expectedFiles,
+            expires_at: new Date(ticket.expiresAt).toISOString(),
+            shell_command: ticket.shellCommand,
+            note: 'Run shell_command (adjusting local file paths if needed) to stream each file directly to Doop and atomically commit the release and update /latest/.',
+          })
+        }
+
+        if (fileList.length === 0) {
+          return err('files array with content or source_url is required in inline mode')
+        }
+        const resolvedFiles: PublishFileInput[] = []
+        for (const item of fileList) {
+          if (item.content !== undefined && item.source_url !== undefined) {
+            return err(`file "${item.path}": specify either content or source_url, not both`)
+          }
+          if (item.content !== undefined) {
+            resolvedFiles.push({
+              path: item.path,
+              buffer: Buffer.from(item.content, item.encoding === 'base64' ? 'base64' : 'utf8'),
+            })
+          } else if (item.source_url !== undefined) {
+            let parsedUrl: URL
+            try {
+              parsedUrl = new URL(item.source_url)
+            } catch {
+              return err(`invalid source_url for "${item.path}"`)
+            }
+            if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+              return err(`source_url for "${item.path}" must use http or https`)
+            }
+            const res = await fetch(parsedUrl, { signal: AbortSignal.timeout(20_000) })
+            if (!res.ok) return err(`failed to fetch source_url for "${item.path}" (HTTP ${res.status})`)
+            const buf = Buffer.from(await res.arrayBuffer())
+            if (buf.length > DS_MAX_FILE_BYTES) {
+              return err(
+                `fetched file "${item.path}" exceeds the ${DS_MAX_FILE_BYTES / 1024 / 1024} MB single-file limit`,
+              )
+            }
+            resolvedFiles.push({ path: item.path, buffer: buf })
+          } else {
+            return err(`file "${item.path}" is missing content or source_url (or use upload_mode="ticket")`)
+          }
+        }
+
+        const result = await publishRelease({
+          name,
+          version,
+          userId: ownerId,
+          workspaceId: workspace_id,
+          files: resolvedFiles,
+          manifest: parsedManifest,
+          notes,
+          overwrite,
+        })
+        return text({
+          ok: true,
+          mode: 'inline',
+          name: result.designSystem.name,
+          version: result.release.version,
+          workspace_id: result.designSystem.workspaceId,
+          latest_base_url: result.designSystem.latestBaseUrl,
+          versioned_base_url: result.designSystem.versionedBaseUrl,
+          latest_urls: result.latestUrls,
+          versioned_urls: result.versionedUrls,
+          files: result.release.files,
+          total_bytes: result.release.totalBytes,
+        })
+      } catch (e) {
+        return err(
+          e instanceof DesignSystemError
+            ? e.message
+            : e instanceof Error
+              ? e.message
+              : 'failed to publish design system bundle',
+        )
+      }
+    },
+  )
+
+  server.registerTool(
+    'rollback_design_system',
+    {
+      title: 'Roll back a Design System latest pointer',
+      description:
+        'Atomically switch /ds/<name>/latest/ back to an existing published historical version and immediately flush the server cache. Workspace members only.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        name: z.string().describe('Design system slug, e.g. "gonovus"'),
+        version: z.string().describe('Target historical version to make latest'),
+      },
+    },
+    async ({ name, version }) => {
+      try {
+        const updated = await rollbackDesignSystem(name, version, ownerId)
+        return text({
+          ok: true,
+          name: updated.name,
+          latest_version: updated.latestVersion,
+          latest_base_url: updated.latestBaseUrl,
+          versioned_base_url: updated.versionedBaseUrl,
+        })
+      } catch (e) {
+        return err(
+          e instanceof DesignSystemError
+            ? e.message
+            : e instanceof Error
+              ? e.message
+              : 'failed to roll back design system',
+        )
+      }
+    },
+  )
+
+  server.registerTool(
     'get_design_system',
     {
       title: 'Inspect hosted real-component Design System',
       description:
-        'Read the real exported components, TypeScript prop definitions (with JSDoc usage notes), and CSS tokens of the hosted SpecFlow Design System served from /ds/specflow/latest. Use section="overview" to list all exported window.SpecFlow names, section="components" with comma-separated query (e.g. "Button,Dialog,StatusIndicator") to inspect exact props, or section="tokens" to inspect tokens.json.',
+        'Inspect any hosted Design System served from /ds/<ds_name>/<version|latest> (e.g. "gonovus" or "specflow"). section="overview" lists runtime/scripts/stylesheets/files/exports; section="components" searches index.d.ts or catalog.json; section="tokens" searches tokens.json (or parses tokens.css automatically); section="guide" returns the live usage guide.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
       inputSchema: {
-        section: z.enum(['overview', 'components', 'tokens']).optional().describe('Default "overview"'),
+        section: z.enum(['overview', 'components', 'tokens', 'guide']).optional().describe('Default "overview"'),
         query: z
           .string()
           .optional()
-          .describe('Optional comma-separated filter for components or tokens, e.g. "Button,Dialog,AgentLogo"'),
-        ds_name: z.string().optional().describe('Design system name (default "specflow")'),
+          .describe('Optional comma-separated filter for components or tokens, e.g. "Button,Status,Toggle"'),
+        ds_name: z
+          .string()
+          .optional()
+          .describe('Design system name (e.g. "gonovus" or "specflow"; default "specflow")'),
+        ds_version: z.string().optional().describe('Version tag or "latest" (default "latest")'),
       },
     },
-    async ({ section, query, ds_name }) => {
+    async ({ section, query, ds_name, ds_version }) => {
       try {
-        return text(await getDesignSystemCatalog({ section, query, dsName: ds_name }))
+        return text(await getDesignSystemCatalog({ section, query, dsName: ds_name, dsVersion: ds_version }))
       } catch (e) {
         return err(e instanceof Error ? e.message : 'failed to read design system catalog')
       }
+    },
+  )
+
+  server.registerTool(
+    'create_ds_frame',
+    {
+      title: 'Create a real-component Design System JSX frame',
+      description:
+        'Create a new canvas frame from pure React JSX using ANY hosted Design System (e.g. ds_name="gonovus" -> React 18 UMD + window.GoNovusA; ds_name="specflow" -> React 19 + window.SpecFlow + Lucide). The server compiles JSX with esbuild and wraps it in a FRAME_BOOTSTRAP-safe HTML shell loading same-origin /ds/* assets and wiring window.__doopReady for crisp screenshots. Your JSX must define top-level function App() or Artboard() without import statements.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z.string(),
+        pageId: z.string().optional().describe('Target page ID from get_canvas; defaults to first page'),
+        name: z.string().describe('Frame title'),
+        ds_name: z.string().describe('Hosted design system slug, e.g. "gonovus" or "specflow"'),
+        ds_version: z.string().optional().describe('Version tag or "latest" (default "latest")'),
+        jsx: z
+          .string()
+          .describe(
+            'Pure React JSX defining top-level function App() or Artboard(). React, useState, useEffect, useMemo, useRef, Fragment, and the DS global (e.g. GoNovusA or SpecFlow) are already in scope — no import statements.',
+          ),
+        theme: z.enum(['light', 'dark']).optional().describe('Theme mode (default "light")'),
+        width: z.number().optional().describe('Frame width in px (default 1440)'),
+        height: z.number().optional().describe('Frame height in px (default 960)'),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        extra_css: z.string().optional().describe('Optional extra CSS rules appended to the frame <style>'),
+        ds_base_url: z.string().optional().describe('Optional trusted DS base URL override'),
+        agent_name: agentName,
+      },
+    },
+    async ({
+      canvas_id,
+      pageId,
+      name,
+      ds_name,
+      ds_version,
+      jsx,
+      theme,
+      width,
+      height,
+      x,
+      y,
+      extra_css,
+      ds_base_url,
+      agent_name,
+    }) => {
+      if (!canvasFor(canvas_id, 'edit')) return noCanvas(canvas_id)
+      let html: string
+      try {
+        html = await wrapDesignSystemJsxHtml(jsx, {
+          dsName: ds_name,
+          dsVersion: ds_version,
+          theme: theme ?? 'light',
+          title: name,
+          extraCss: extra_css,
+          dsBaseUrl: ds_base_url,
+        })
+      } catch (e) {
+        return err(`Design System JSX compilation failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      const frame = actions.createFrame(
+        canvas_id,
+        { name, pageId, html, x, y, width: width ?? 1440, height: height ?? 960 },
+        actorFrom(agent_name),
+      )
+      if (!frame) return noCanvas(canvas_id)
+      const registered = getRegisteredDesignSystem(ds_name)
+      const result = textWithNudge(
+        {
+          ok: true,
+          ds_name,
+          ds_version: ds_version ?? registered?.latestVersion ?? 'latest',
+          frame: frameSummary(frame),
+        },
+        REVIEW_NUDGE,
+      )
+      return withGuidelinesNudge(
+        withStatusNudge(withFeedback(result, canvas_id, actorFrom(agent_name)), canvas_id, actorFrom(agent_name)),
+        canvas_id,
+        actorFrom(agent_name),
+      )
+    },
+  )
+
+  server.registerTool(
+    'update_ds_frame',
+    {
+      title: 'Update a real-component Design System JSX frame',
+      description:
+        'Replace a frame’s design by compiling pure React JSX on the server with esbuild and wrapping it for any hosted Design System (e.g. ds_name="gonovus" or "specflow"). Preserves comments, version history, and frame geometry.',
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        frame_id: z.string(),
+        ds_name: z.string().describe('Hosted design system slug, e.g. "gonovus" or "specflow"'),
+        ds_version: z.string().optional().describe('Version tag or "latest" (default "latest")'),
+        jsx: z
+          .string()
+          .describe(
+            'Pure React JSX defining top-level function App() or Artboard(). React, useState, useEffect, useMemo, useRef, Fragment, and the DS global (e.g. GoNovusA or SpecFlow) are already in scope — no import statements.',
+          ),
+        theme: z.enum(['light', 'dark']).optional().describe('Theme mode (default "light")'),
+        extra_css: z.string().optional().describe('Optional extra CSS rules appended to the frame <style>'),
+        ds_base_url: z.string().optional().describe('Optional trusted DS base URL override'),
+        agent_name: agentName,
+      },
+    },
+    async ({ frame_id, ds_name, ds_version, jsx, theme, extra_css, ds_base_url, agent_name }) => {
+      const current = frameFor(frame_id, 'edit')
+      if (!current) return noFrame(frame_id)
+      let html: string
+      try {
+        html = await wrapDesignSystemJsxHtml(jsx, {
+          dsName: ds_name,
+          dsVersion: ds_version,
+          theme: theme ?? 'light',
+          title: current.name || frame_id,
+          extraCss: extra_css,
+          dsBaseUrl: ds_base_url,
+        })
+      } catch (e) {
+        return err(`Design System JSX compilation failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      const frame = actions.updateFrame(frame_id, { html }, actorFrom(agent_name), { replace: true })
+      if (!frame) return noFrame(frame_id)
+      return withPreview(
+        withGuidelinesNudge(
+          withStatusNudge(
+            withFeedback(
+              textWithNudge({ ok: true, ds_name, frame: frameSummary(frame) }, REVIEW_NUDGE),
+              frame.canvasId,
+              actorFrom(agent_name),
+            ),
+            frame.canvasId,
+            actorFrom(agent_name),
+          ),
+          frame.canvasId,
+          actorFrom(agent_name),
+        ),
+        frame.canvasId,
+        [frame],
+      )
     },
   )
 

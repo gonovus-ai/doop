@@ -13,6 +13,7 @@ import {
 } from 'drizzle-orm/pg-core'
 import { open, seal } from '../secretBox.ts'
 import type { CanvasGuide, CanvasPageInfo, FrameApproval } from '../../shared/types.ts'
+import type { DesignSystemFileMeta, DesignSystemManifest } from '../../shared/designSystems.ts'
 import type { AutomationRunState, AutomationTrigger, Schedule, Step } from '../../shared/automations.ts'
 import type {
   ComponentCode,
@@ -1114,3 +1115,43 @@ export const instanceSettings = pgTable('instance_settings', {
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
   updatedBy: text('updated_by'),
 })
+
+/** Hosted real-component design systems (shared/designSystems.ts), served from
+ *  same-origin /ds/<name>/<version|latest>/*. Workspace-scoped: any member of
+ *  the owning workspace can publish new immutable releases or roll back latest. */
+export const designSystems = pgTable(
+  'design_systems',
+  {
+    name: text('name').primaryKey(),
+    workspaceId: text('workspace_id').notNull(),
+    displayName: text('display_name').notNull(),
+    description: text('description').notNull().default(''),
+    latestVersion: text('latest_version').notNull(),
+    manifest: jsonb('manifest').$type<DesignSystemManifest>().notNull(),
+    createdBy: text('created_by').notNull(),
+    updatedBy: text('updated_by').notNull(),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+    updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [index('design_systems_workspace_idx').on(t.workspaceId)],
+)
+
+/** Immutable published releases of a design system; bytes live in storage.ts
+ *  under ds/<name>/<version>/<relpath>. */
+export const designSystemReleases = pgTable(
+  'design_system_releases',
+  {
+    name: text('name').notNull(),
+    version: text('version').notNull(),
+    manifest: jsonb('manifest').$type<DesignSystemManifest>().notNull(),
+    files: jsonb('files').$type<DesignSystemFileMeta[]>().notNull(),
+    totalBytes: integer('total_bytes').notNull(),
+    notes: text('notes'),
+    publishedBy: text('published_by').notNull(),
+    createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.name, t.version] }),
+    index('design_system_releases_name_created_idx').on(t.name, t.createdAt),
+  ],
+)
