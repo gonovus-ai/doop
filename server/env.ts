@@ -321,6 +321,11 @@ const schema = {
   DOOP_APNS_KEY_ID: str({ default: undefined }),
   DOOP_APNS_PRIVATE_KEY: str({ default: undefined }),
   DOOP_APNS_BUNDLE_ID: str({ default: 'design.doop.ios' }),
+
+  /* ------------------------------------------------- design systems */
+  DOOP_DS_UPSTREAM_BASE: str({ default: 'https://storage.googleapis.com/specflow-design-systems-2611/ds' }),
+  DOOP_DS_NAME: str({ default: 'specflow' }),
+  DOOP_TRUSTED_ASSET_PREFIXES: list({ default: ['https://storage.googleapis.com/specflow-design-systems-2611/'] }),
 }
 
 /** Every declared variable name, for the .env.example coverage test. */

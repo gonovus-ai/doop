@@ -168,13 +168,15 @@ export async function loadFramePage(frame: Frame, options?: PageOptions): Promis
 
 async function loadFrameInto(page: Page, frame: Frame): Promise<void> {
   const assetOrigin = new URL(env.BETTER_AUTH_URL).origin
+  const trustedPrefixes = env.DOOP_TRUSTED_ASSET_PREFIXES
   await guardPublicPageRequests(page, {
     allowUrl: (url) =>
-      (url.origin === assetOrigin && /^\/(?:a|icons|photos)\//.test(url.pathname)) ||
+      (url.origin === assetOrigin && /^\/(?:a|icons|photos|ds)\//.test(url.pathname)) ||
       /* webfonts referenced by imported frames (imports request the
          source design's families from Google Fonts) */
       url.origin === 'https://fonts.googleapis.com' ||
-      url.origin === 'https://fonts.gstatic.com',
+      url.origin === 'https://fonts.gstatic.com' ||
+      trustedPrefixes.some((prefix) => url.href.startsWith(prefix)),
   })
   await page.setViewport({
     width: Math.max(1, Math.round(frame.width)),
@@ -195,11 +197,24 @@ async function loadFrameInto(page: Page, frame: Frame): Promise<void> {
   try {
     await page.setContent(html, {
       waitUntil: 'load',
-      timeout: 8000,
+      timeout: 15000,
     })
   } catch {
     /* Slow external resources: inspect whatever has rendered. */
   }
+  await page
+    .evaluate(async () => {
+      const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+      const ready = (window as unknown as { __doopReady?: Promise<unknown> | boolean }).__doopReady
+      if (ready && typeof (ready as Promise<unknown>).then === 'function') {
+        await Promise.race([(ready as Promise<unknown>).catch(() => {}), wait(8000)])
+      }
+      if (document.fonts?.ready) {
+        await Promise.race([document.fonts.ready.catch(() => {}), wait(2000)])
+      }
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+    })
+    .catch(() => {})
   /* `load` does not cover a face from a linked stylesheet (Google Fonts):
      without this a capture intermittently shows the fallback fonts */
   await settleFonts(page.mainFrame())

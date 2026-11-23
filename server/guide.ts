@@ -11,6 +11,9 @@ import { MAX_DECISION_CHARS } from '../shared/designDecisions.ts'
 
 export const GUIDE_TOPICS = [
   'doop-instructions',
+  'design-craft',
+  'review-pipeline',
+  'specflow-components',
   'images',
   'components',
   'prototypes',
@@ -25,6 +28,10 @@ export type GuideTopic = (typeof GUIDE_TOPICS)[number]
 /** What each topic covers: listed in get_guide's description and at the end of the main guide. */
 export const GUIDE_TOPIC_SUMMARIES: Record<GuideTopic, string> = {
   'doop-instructions': 'the main guide: load it first, before any other Doop tool',
+  'design-craft': 'clarifying questions, multi-direction exploration with tradeoffs, and anti-AI-slop craft',
+  'review-pipeline': 'mandatory 5-role self-review (UX, Copy, Brand, A11y, Polish) + inspect_frame + save_decision',
+  'specflow-components':
+    'authoring real React 19 SpecFlow component frames (get_design_system + create_specflow_frame) and Usage Notes',
   images: 'photos, backgrounds, icons, logos, generated images and uploads in full',
   components: 'nesting, variants, overrides, deleting, other canvases and workspace libraries',
   prototypes: 'wiring screens into a clickable flow',
@@ -602,6 +609,28 @@ Two tools reach the Doop team, never the humans on the canvas, and change no can
 
 Never include secrets. A human's design feedback is not this: record that with save_decision.
 
+## Team Skills & SpecFlow Real-Component Workflow
+
+This self-hosted Doop instance ships live editable Skills (managed in **Settings -> Skills**)
+and a real compiled SpecFlow React 19 component runtime served from this server's own \`/ds/\`
+origin:
+
+- **Load live Skills first**: call \`list_skills\` (passing \`canvas_id\` when working on a
+  canvas) and call \`get_skill\` for every relevant handle before creating or editing frames.
+  Team Skills in \`Settings -> Skills\` outrank generic defaults.
+- **Explore before polishing**: for new features or ambiguous briefs, load
+  \`get_guide({ topic: "design-craft" })\` — clarify the 1–3 highest-leverage forks first, or
+  put 2–4 genuinely distinct direction artboards on the canvas with honest tradeoffs before
+  committing to full hi-fi states.
+- **SpecFlow UI MUST render real components**: NEVER hand-draw fake HTML/CSS look-alikes of
+  SpecFlow controls. Load \`get_guide({ topic: "specflow-components" })\`, call
+  \`get_design_system\` to inspect real exports and prop types, and author JSX via
+  \`create_specflow_frame\` / \`update_specflow_frame\` (server compiles JSX with esbuild and
+  loads \`window.SpecFlow\` + React 19 over same-origin \`/ds/specflow/latest\`).
+- **Mandatory 5-role self-review**: before presenting work to humans, load
+  \`get_guide({ topic: "review-pipeline" })\` and verify UX, Copy, Brand, Accessibility, and
+  Visual Polish alongside \`get_frame_screenshot\` and \`inspect_frame\`.
+
 ## More topics
 
 Load one with get_guide({ topic }) when your task needs it:
@@ -613,6 +642,146 @@ ${GUIDE_TOPICS.filter((topic) => topic !== 'doop-instructions')
 
 /** The topics past the main guide, each loaded on its own when a task needs it. */
 const TOPIC_TEXT: Record<Exclude<GuideTopic, 'doop-instructions'>, string> = {
+  'design-craft': `# Design Craft — Clarify, Explore Directions, Root Hi-Fi in Context
+
+## 1. Ask only high-leverage, context-grounded questions
+- Read the user's codebase, existing screens, PRD, style guides, and \`list_skills\` BEFORE
+  asking anything. Never ask what the existing context already answers, and never ask generic
+  intake-form questions ("audience? colors?").
+- Only ask when the brief leaves 2+ genuine decisions open that would materially change the
+  information architecture, primary user flow, or interaction model.
+- Ask at most 1–3 crisp questions. Each option (2–4 per question) must represent a concrete
+  design axis ("Starter templates inline" vs "Surface GitHub import here"), never shades of one
+  idea. Put your recommended pick first with "(Recommended)".
+- Once the user answers, treat every answer as settled and restate assumptions in one line.
+  Never re-ask a settled decision; if nobody is available to answer, decide, state assumptions
+  briefly, and build.
+
+## 2. Settle direction with genuinely distinct options on the canvas
+- Do NOT silently pick an aesthetic or interaction paradigm when the direction is open — that
+  is how generic AI output happens.
+- Put 2–4 genuinely different direction artboards side by side, each exploring a nameable axis
+  (e.g. "A · Dense table workbench" vs "B · Guided stepped flow" vs "C · Split master-detail").
+  Decision fidelity does not need full production edge states — get the structure on canvas fast
+  so the human can react visually.
+- In your reply (not on the artboards), give each option an honest rationale AND its main
+  tradeoff. Never rig the vote by arguing only for your favorite.
+- Keep option identifiers stable across turns ("Option B" stays "Option B" — never renumber).
+
+## 3. Hi-fi designs are rooted in real product context
+- Never mock an existing product from scratch when its real codebase, screenshots, or design
+  system exist. Match its exact navigation shell, typography scale, spacing cadence, and real
+  components (\`create_specflow_frame\`).
+- Once a direction is locked, build the complete deliverable matrix on the canvas:
+  1. Desktop Light (\`1440×960\`) — resting / primary state
+  2. Desktop Dark (\`1440×960\`) — token-driven dark mode
+  3. Key interaction states (empty / loading / connected / success / error / expanded / modal)
+  4. Mobile responsive (\`390px\` width, sized tall enough so \`inspect_frame\` reports 0 clipping)
+- Use realistic domain data everywhere (real workspace names, plausible timestamps, real
+  commands and states). Zero lorem ipsum, zero "Item 1 / Item 2", zero invented placeholder logos.
+- Record non-obvious design decisions and their rationale with \`save_decision\` so canvas
+  Memory preserves *why* a choice was made.
+`,
+  'review-pipeline': `# 5-Role Self-Review Pipeline (Mandatory Before Hand-Off)
+
+Before telling a human a frame is ready to review, inspect EVERY created or updated frame with
+both \`get_frame_screenshot\` (look at the actual pixels) and \`inspect_frame\` (\`problemCount\`
+must be \`0\`), and run all five specialist passes:
+
+1. **UX Lead (Flow, Hierarchy, States, Affordances)**
+   - Is the single primary action unmistakable within 2 seconds?
+   - Does visual reading order match decision order?
+   - Are empty, loading, success, error, disabled, and confirmation states accounted for?
+   - Do interactive controls look clearly clickable/editable vs read-only metadata?
+2. **Copywriter (Precision & Restraint)**
+   - Own every heading, subhead, label, button verb, helper note, and empty-state line.
+   - Cut filler words and vague verbs ("Click here to manage..."); prefer specific domain nouns
+     and concrete outcomes. Keep rewrites inside their layout boxes without awkward wrapping.
+3. **Brand & System Compliance**
+   - Are 100% of SpecFlow controls rendered via real \`window.SpecFlow\` components and CSS
+     tokens (no off-palette hexes, no stray fonts, no unapproved badge tones, no hand-drawn
+     copies of shared components)?
+   - Does every semantic color obey "one color = one meaning"?
+4. **Accessibility (WCAG AA & Keyboard/Touch Discipline)**
+   - Text contrast >= 4.5:1 (body) and >= 3:1 (large text, icons, control borders) in BOTH
+     light and dark themes.
+   - One \`<h1>\` per screen, ordered headings, semantic landmarks (\`<nav>\`, \`<main>\`,
+     \`<section>\`, \`<header>\`), real \`<button>\`/\`<a>\` elements instead of clickable \`<div>\`s.
+   - Mobile touch targets >= 40–44px; text inputs keep clean focus border/caret without filling
+     the input background or adding messy outer focus rings.
+5. **Visual Polish (Geometry, Alignment, Zero Overflow)**
+   - Confirm \`inspect_frame\` reports \`problemCount: 0\` (zero off-frame, clipped, or overlapping
+     elements). Resize frame height with \`update_frame\` if content clips at the bottom.
+   - Tighten optical alignment, verify consistent spacing steps, eliminate orphaned words or
+     jagged icon/action columns.
+   - Prefer targeted edits over deleting and recreating a mostly-good frame (preserving
+     comments, version history, and approval state).
+   - Never call \`set_frame_approval\` to mark your own work \`ready_for_dev\` unless the human
+     explicitly asks you to.
+`,
+  'specflow-components': `# SpecFlow Real-Component System & Product Usage Notes
+
+## 1. Real components only — never hand-draw fake UI
+This Doop server hosts SpecFlow's real compiled React 19 component bundle (\`window.SpecFlow\`),
+\`LucideReact\`, \`tokens.css\`, \`bundle.css\`, and Geist fonts at \`/ds/specflow/latest\`.
+
+Workflow:
+1. Call \`get_design_system({ section: "overview" })\` to see all exported \`window.SpecFlow\`
+   component names and token groups.
+2. Call \`get_design_system({ section: "components", query: "Button,Dialog,StatusIndicator" })\`
+   to verify exact TypeScript prop names and JSDoc usage notes. **Never invent component names
+   or props.**
+3. Author pure React JSX defining a top-level \`function App()\` (or \`function Artboard()\`).
+   Inside JSX, \`React\`, \`useState\`, \`useEffect\`, \`useMemo\`, \`useRef\`, \`Fragment\`,
+   \`SpecFlow\`, and \`Lucide\` are ALREADY in scope — do NOT write \`import\` statements and do
+   NOT redeclare \`const SpecFlow = ...\` at top level.
+4. Submit JSX directly with \`create_specflow_frame\` or \`update_specflow_frame\`. The server
+   compiles JSX with esbuild into a \`FRAME_BOOTSTRAP\`-safe document (no Babel, parallel script
+   preload + sequential load, \`MutationObserver\` self-heal, React ErrorBoundary).
+
+## 2. Sandboxed iframe runtime rules (\`sandbox="allow-scripts"\`)
+- Doop live canvas frames run with opaque origin \`null\`. Do NOT access \`localStorage\`,
+  \`sessionStorage\`, \`document.cookie\`, or \`history.pushState\`.
+- Guard \`navigator.clipboard.writeText\` (catch rejections silently) so copy buttons show
+  copied feedback cleanly inside the canvas prototype player.
+- Keep realistic state interactive (\`useState\` for tabs, dialogs, collapsibles, copy feedback,
+  revoke confirmations) so humans can test real interactions in Doop Prototype / Play mode.
+
+## 3. SpecFlow Component & Interaction Usage Notes (Canonical Rules)
+Follow \`docs/agents/web-product-interactions.md\`:
+- **Reuse catalog first**: Use \`Button\`, \`Input\`, \`Select\`, \`Tabs\`, \`Dialog\`,
+  \`AlertDialog\`, \`Sheet\`, \`Popover\`, \`Collapsible\`, \`CreateDialog\`, \`Field\`,
+  \`ResourceState\`, \`EmptyState\`, \`StatusSurface\`, \`CircleDividedList\`,
+  \`SettingsSection\`, \`Toolbar\`, \`PageBody\`, \`WorkspaceTopBar\`, \`CircleIcon\`, \`Kbd\`,
+  \`UserAvatar\`, \`DitherAvatar\`, \`ProductMark\`.
+- **One color = one meaning**:
+  - Green = done / added
+  - Red = problem / danger / removed (use \`var(--status-danger-solid)\` with \`#ffffff\` text
+    for solid danger counters)
+  - Amber = unfinished / in progress / draft / awaiting confirmation
+  - Blue = in review
+  - Purple = merged
+  - Grey = neutral / everything else
+- **Status marks**: Use \`WorkflowStatusGlyph\` for progress, \`StatusIndicator\` /
+  \`StatusIndicatorButton\` for status words, \`ChangeMark\` / \`ChangeTotals\` for diffs
+  (\`+2 ~1 −1\`; modified is never amber), and \`HealthMark\` for plan health. Never use a bare
+  \`StatusDot\` for meaning; \`Badge\` has no success or warning tone.
+- **Control size ladder (never override fixed heights in className)**:
+  - \`Button\` sizes: \`chip\` (22px, with \`variant="chip"\`), \`xxs\` (28px), \`property\`
+    (30px), \`xs\` (32px), \`sm\` (36px), \`default\` (40px), \`lg\` (44px); square icons:
+    \`icon-xs\` (24px) through \`icon-2xl\` (44px).
+- **Typography & page headings**: Page/object \`<h1>\` uses \`text-page-title font-semibold
+  tracking-title\` (20px / 28px line-height).
+- **Avatars**: \`UserAvatar\` for people; \`DitherAvatar\` for Workspaces and Projects.
+- **Shortcuts**: Use \`Kbd\` for all keyboard hints; put a full chord in ONE \`<Kbd>⌘K</Kbd>\`,
+  never split keys into separate boxes.
+- **Paged lists**: SpecFlow NEVER uses a "Load more" button — use scroll-triggered pagination
+  (\`LoadMoreOnScroll\`).
+- **Focus & overlays**: Text inputs/textareas/selects keep their background unchanged on focus
+  (border/caret only, no outer CSS ring). Dialogs focus the first editable text field; Sheets
+  are reading panels; AlertDialogs focus the action button.
+- **Charts**: Use \`TimeSeriesChart\` with \`ChartTone\` tokens — never hand-write chart SVGs.
+`,
   images: `# Images — search first, then upload
 
 Real imagery is what separates an appealing design from a wireframe. Frames can load

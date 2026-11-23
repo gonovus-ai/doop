@@ -121,6 +121,10 @@ import { componentSystemPlan } from './reuseNotes.ts'
 import { previewCombinations, previewDescription, previewFrame, previewProps } from './componentPreview.ts'
 import { activeComponents, componentSignature, INSTANCE_ATTR } from '../shared/components.ts'
 import { usageByComponent } from './componentUsage.ts'
+import type { AgentScope } from '../shared/customAgents.ts'
+import { parseSkillInput } from '../shared/skills.ts'
+import { createSkill, listSkills as listStoredSkills, SkillInputError, skillsForCanvas, updateSkill } from './skills.ts'
+import { getDesignSystemCatalog, wrapSpecFlowJsxHtml } from './specflowDesignSystem.ts'
 
 /* What every agent gets in the handshake. Claude Code cuts server instructions at 4,096
    characters (older versions at 2,048) and ChatGPT reads the first 512 most, so this is the
@@ -128,15 +132,15 @@ import { usageByComponent } from './componentUsage.ts'
    get_guide (tests/mcpInstructions.test.ts holds the budget). */
 export const INSTRUCTIONS = `Doop is a shared multiplayer design canvas: humans and AI agents design together in real time. Canvases hold frames, artboards that render complete HTML documents live for everyone viewing.
 
-You MUST call get_guide({ topic: "doop-instructions" }) before using other Doop tools, and again if a long conversation may have dropped it. It lists further topics (images, components, prototypes, redesigns…) to load when a task needs one.
+You MUST call get_guide({ topic: "doop-instructions" }) before using other Doop tools, and again if a long conversation may have dropped it. It lists further topics (design-craft, review-pipeline, specflow-components, images, components, prototypes, redesigns…) to load when a task needs one.
 
+- Team Skills (Settings -> Skills): call list_skills (with canvas_id when working on a canvas) and get_skill for relevant handles BEFORE designing — they carry live team design rules editable in the UI.
+- Real-component SpecFlow UI: NEVER hand-draw fake copies of SpecFlow components. Load get_guide({ topic: "specflow-components" }), inspect real exports/props with get_design_system, and submit pure React JSX via create_specflow_frame / update_specflow_frame (server compiles JSX with esbuild and loads window.SpecFlow over same-origin /ds/specflow/latest).
+- Direction & Craft: load get_guide({ topic: "design-craft" }) for new/ambiguous work — clarify high-leverage forks or show 2–4 genuinely distinct direction artboards with honest tradeoffs before polishing.
 - Call get_canvas before adding or editing frames. Pick one agent_name and pass it on every call; set_status says what you are working on.
 - HUMAN FEEDBACK blocks in tool results are requests from people on the canvas: handle them before your own plan.
-- Tokens: colours, fonts and sizes are var(--name) from the canvas's design tokens. No tokens yet: create_tokens before the first frame. Never a palette on a frame's :root.
-- Components: before the first screen, set up the canvas's component system with create_components (primitives like Button and Input, patterns like nav and card), then compose screens from it. Anything get_canvas lists goes in as <doop-use component="Name" …>, never redrawn.
 - Style guides: read the canvas's with get_guidelines before designing, and follow them.
-- Create with create_frame, then stream append_frame_html one section per call. Small changes: edit_frame_html. Rename, move, resize: update_frame.
-- After every create or significant edit, call get_frame_screenshot and fix what looks wrong.
+- After every create or significant edit, call get_frame_screenshot AND inspect_frame, run the 5-role review (get_guide review-pipeline), and fix what looks wrong.
 - Keep every data-doop-* attribute when you rewrite markup: comments, links and prototype wiring hang on them.
 - A request naming a site or URL: call import_webpage FIRST and design from what is there; view_website is only for read-only inspection.
 - Images come from search_images, search_icons, search_logos, upload_asset or generate_image. Never a base64 data: URI, a placeholder logo or an invented brand.
@@ -505,6 +509,335 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
       },
     },
     async ({ topic }) => text(guideFor(topic, extensionGuideLines())),
+  )
+
+  server.registerTool(
+    'list_skills',
+    {
+      title: 'List Doop Skills (Settings -> Skills)',
+      description:
+        'List the live design Skills stored in Doop (editable in Settings -> Skills). Pass canvas_id to read the skills scoped to that canvas (its workspace, else its owner), workspace_id for a specific workspace you belong to, or omit both for your personal skills plus your workspaces. Call get_skill for the full instructions of any relevant handle before designing.',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z.string().optional().describe('Canvas ID to resolve skills scoped to that canvas'),
+        workspace_id: z.string().optional().describe('Workspace ID (must be a member)'),
+      },
+    },
+    async ({ canvas_id, workspace_id }) => {
+      const summarize = (
+        s: { handle: string; description: string; body: string; updatedAt: number },
+        scope: string,
+      ) => ({
+        handle: s.handle,
+        description: s.description,
+        scope,
+        bytes: s.body.length,
+        updatedAt: new Date(s.updatedAt).toISOString(),
+      })
+      if (canvas_id) {
+        const canvas = canvasFor(canvas_id, 'view')
+        if (!canvas) return noCanvas(canvas_id)
+        const scope = canvas.workspaceId ? `workspace:${canvas.workspaceId}` : 'personal'
+        const items = skillsForCanvas(canvas).map((s) => summarize(s, scope))
+        return text({
+          scope,
+          skills: items,
+          ...(items.length === 0
+            ? { note: 'No skills saved in this scope yet. Add them in Doop Settings -> Skills or via save_skill.' }
+            : {}),
+        })
+      }
+      if (!ownerId) return err('sign in or authenticate with an Agent Key to read skills')
+      if (workspace_id) {
+        if (!workspaces.isWorkspaceMember(workspace_id, ownerId)) return err('you are not a member of this workspace')
+        const items = listStoredSkills({ workspaceId: workspace_id }, ownerId).map((s) =>
+          summarize(s, `workspace:${workspace_id}`),
+        )
+        return text({ scope: `workspace:${workspace_id}`, skills: items })
+      }
+      const personal = listStoredSkills({ personal: true }, ownerId).map((s) => summarize(s, 'personal'))
+      const wsSkills = workspaces
+        .workspaceIdsFor(ownerId)
+        .flatMap((wsId) =>
+          listStoredSkills({ workspaceId: wsId }, ownerId).map((s) => summarize(s, `workspace:${wsId}`)),
+        )
+      return text({
+        skills: [...personal, ...wsSkills],
+        ...(personal.length + wsSkills.length === 0
+          ? { note: 'No skills saved yet. Add them in Doop Settings -> Skills or via save_skill.' }
+          : {}),
+      })
+    },
+  )
+
+  server.registerTool(
+    'get_skill',
+    {
+      title: 'Read a Doop Skill in full',
+      description:
+        'Read the full markdown instructions of a Skill stored in Doop Settings -> Skills by handle (e.g. "design-craft", "review-pipeline", "specflow-ui").',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        handle: z.string().describe('Skill handle from list_skills (with or without leading /)'),
+        canvas_id: z.string().optional().describe('Optional canvas ID to read from the canvas scope'),
+        workspace_id: z.string().optional().describe('Optional workspace ID (must be a member)'),
+      },
+    },
+    async ({ handle, canvas_id, workspace_id }) => {
+      const normalized = handle.trim().replace(/^\/+/, '').toLowerCase()
+      if (!normalized) return err('handle is required')
+      if (canvas_id) {
+        const canvas = canvasFor(canvas_id, 'view')
+        if (!canvas) return noCanvas(canvas_id)
+        const list = skillsForCanvas(canvas)
+        const found = list.find((s) => s.handle === normalized)
+        if (!found) {
+          const available = list.map((s) => s.handle)
+          return err(
+            available.length
+              ? `no skill /${normalized} in this canvas's scope — available: ${available.join(', ')}`
+              : `no skills defined in this canvas's scope yet`,
+          )
+        }
+        return text({
+          handle: found.handle,
+          description: found.description,
+          scope: canvas.workspaceId ? `workspace:${canvas.workspaceId}` : 'personal',
+          updatedAt: new Date(found.updatedAt).toISOString(),
+          body: found.body,
+        })
+      }
+      if (!ownerId) return err('sign in or authenticate with an Agent Key to read skills')
+      if (workspace_id) {
+        if (!workspaces.isWorkspaceMember(workspace_id, ownerId)) return err('you are not a member of this workspace')
+        const list = listStoredSkills({ workspaceId: workspace_id }, ownerId)
+        const found = list.find((s) => s.handle === normalized)
+        if (!found) return err(`no skill /${normalized} in workspace ${workspace_id}`)
+        return text({
+          handle: found.handle,
+          description: found.description,
+          scope: `workspace:${workspace_id}`,
+          updatedAt: new Date(found.updatedAt).toISOString(),
+          body: found.body,
+        })
+      }
+      const personal = listStoredSkills({ personal: true }, ownerId)
+      const hitPersonal = personal.find((s) => s.handle === normalized)
+      if (hitPersonal) {
+        return text({
+          handle: hitPersonal.handle,
+          description: hitPersonal.description,
+          scope: 'personal',
+          updatedAt: new Date(hitPersonal.updatedAt).toISOString(),
+          body: hitPersonal.body,
+        })
+      }
+      for (const wsId of workspaces.workspaceIdsFor(ownerId)) {
+        const hitWs = listStoredSkills({ workspaceId: wsId }, ownerId).find((s) => s.handle === normalized)
+        if (hitWs) {
+          return text({
+            handle: hitWs.handle,
+            description: hitWs.description,
+            scope: `workspace:${wsId}`,
+            updatedAt: new Date(hitWs.updatedAt).toISOString(),
+            body: hitWs.body,
+          })
+        }
+      }
+      return err(`no skill /${normalized} found for this account`)
+    },
+  )
+
+  server.registerTool(
+    'save_skill',
+    {
+      title: 'Create or update a Doop Skill',
+      description:
+        'Create or update a reusable Skill in Doop (stored in Postgres and immediately editable in Settings -> Skills). Handle is 2–32 lowercase letters/digits/hyphens; description is 1–120 chars; body is 20–8000 chars of Markdown.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        handle: z.string().describe('Lowercase slug, e.g. "design-craft" or "specflow-ui"'),
+        description: z.string().describe('One-line summary (1–120 chars) shown in Settings -> Skills'),
+        body: z.string().describe('Markdown instructions (20–8000 chars)'),
+        workspace_id: z
+          .string()
+          .optional()
+          .describe('Optional workspace ID; omit to save in personal Settings -> Skills'),
+      },
+    },
+    async ({ handle, description, body, workspace_id }) => {
+      if (!ownerId) return err('sign in or authenticate with an Agent Key to save skills')
+      const scope: AgentScope = workspace_id ? { workspaceId: workspace_id } : { personal: true }
+      const allowed = () => ('personal' in scope ? true : workspaces.isWorkspaceMember(scope.workspaceId, ownerId))
+      if (!allowed()) return err('you are not a member of this workspace')
+      const parsed = parseSkillInput({ handle, description, body })
+      if (!parsed.ok) return err(parsed.error)
+      try {
+        const existing = listStoredSkills(scope, ownerId).some((s) => s.handle === parsed.value.handle)
+        const saved = existing
+          ? await updateSkill(
+              scope,
+              ownerId,
+              parsed.value.handle,
+              { description: parsed.value.description, body: parsed.value.body },
+              allowed,
+            )
+          : await createSkill(scope, ownerId, parsed.value, allowed)
+        if (!saved) return err('skill could not be saved')
+        return text({
+          ok: true,
+          action: existing ? 'updated' : 'created',
+          scope: workspace_id ? `workspace:${workspace_id}` : 'personal',
+          handle: saved.handle,
+          description: saved.description,
+          bytes: saved.body.length,
+          updatedAt: new Date(saved.updatedAt).toISOString(),
+        })
+      } catch (e) {
+        return err(e instanceof SkillInputError ? e.message : e instanceof Error ? e.message : 'failed to save skill')
+      }
+    },
+  )
+
+  server.registerTool(
+    'get_design_system',
+    {
+      title: 'Inspect hosted real-component Design System',
+      description:
+        'Read the real exported components, TypeScript prop definitions (with JSDoc usage notes), and CSS tokens of the hosted SpecFlow Design System served from /ds/specflow/latest. Use section="overview" to list all exported window.SpecFlow names, section="components" with comma-separated query (e.g. "Button,Dialog,StatusIndicator") to inspect exact props, or section="tokens" to inspect tokens.json.',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        section: z.enum(['overview', 'components', 'tokens']).optional().describe('Default "overview"'),
+        query: z
+          .string()
+          .optional()
+          .describe('Optional comma-separated filter for components or tokens, e.g. "Button,Dialog,AgentLogo"'),
+        ds_name: z.string().optional().describe('Design system name (default "specflow")'),
+      },
+    },
+    async ({ section, query, ds_name }) => {
+      try {
+        return text(await getDesignSystemCatalog({ section, query, dsName: ds_name }))
+      } catch (e) {
+        return err(e instanceof Error ? e.message : 'failed to read design system catalog')
+      }
+    },
+  )
+
+  server.registerTool(
+    'create_specflow_frame',
+    {
+      title: 'Create a real-component SpecFlow JSX frame',
+      description:
+        'Create a new canvas frame from pure React JSX using real compiled window.SpecFlow components + React 19 + LucideReact served from same-origin /ds/specflow/latest. The server compiles JSX with esbuild into a FRAME_BOOTSTRAP-safe HTML document (zero Babel, zero local tooling needed). Your JSX must define a top-level function App() or Artboard() using in-scope SpecFlow, Lucide, React, useState, useEffect, useMemo, useRef, Fragment (no import statements).',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z.string(),
+        pageId: z.string().optional().describe('Target page ID from get_canvas; defaults to first page'),
+        name: z.string().describe('Frame title, e.g. "01 · 首次接入 · 桌面亮色"'),
+        jsx: z
+          .string()
+          .describe(
+            'Pure React JSX defining top-level function App() or Artboard(). React, useState, useEffect, useMemo, useRef, Fragment, SpecFlow, and Lucide are already in scope — do not write import statements.',
+          ),
+        theme: z.enum(['light', 'dark']).optional().describe('Theme mode (default "light")'),
+        width: z.number().optional().describe('Frame width in px (default 1440)'),
+        height: z.number().optional().describe('Frame height in px (default 960)'),
+        x: z.number().optional(),
+        y: z.number().optional(),
+        extra_css: z.string().optional().describe('Optional extra CSS rules appended to the frame <style>'),
+        ds_base_url: z
+          .string()
+          .optional()
+          .describe('Optional trusted DS base URL (defaults to same-origin /ds/specflow/latest)'),
+        agent_name: agentName,
+      },
+    },
+    async ({ canvas_id, pageId, name, jsx, theme, width, height, x, y, extra_css, ds_base_url, agent_name }) => {
+      if (!canvasFor(canvas_id, 'edit')) return noCanvas(canvas_id)
+      let html: string
+      try {
+        html = await wrapSpecFlowJsxHtml(jsx, {
+          theme: theme ?? 'light',
+          title: name,
+          extraCss: extra_css,
+          dsBaseUrl: ds_base_url,
+        })
+      } catch (e) {
+        return err(`SpecFlow JSX compilation failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      const frame = actions.createFrame(
+        canvas_id,
+        { name, pageId, html, x, y, width: width ?? 1440, height: height ?? 960 },
+        actorFrom(agent_name),
+      )
+      if (!frame) return noCanvas(canvas_id)
+      const result = textWithNudge({ ok: true, frame: frameSummary(frame) }, REVIEW_NUDGE)
+      return withGuidelinesNudge(
+        withStatusNudge(withFeedback(result, canvas_id, actorFrom(agent_name)), canvas_id, actorFrom(agent_name)),
+        canvas_id,
+        actorFrom(agent_name),
+      )
+    },
+  )
+
+  server.registerTool(
+    'update_specflow_frame',
+    {
+      title: 'Update a real-component SpecFlow JSX frame',
+      description:
+        'Replace a frame’s design by compiling pure React JSX on the server with esbuild and wrapping it into the FRAME_BOOTSTRAP-safe real-component SpecFlow shell (same-origin /ds/specflow/latest). Preserves comments, version history, and frame geometry.',
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        frame_id: z.string(),
+        jsx: z
+          .string()
+          .describe(
+            'Pure React JSX defining top-level function App() or Artboard(). React, useState, useEffect, useMemo, useRef, Fragment, SpecFlow, and Lucide are already in scope — do not write import statements.',
+          ),
+        theme: z.enum(['light', 'dark']).optional().describe('Theme mode (default "light")'),
+        extra_css: z.string().optional().describe('Optional extra CSS rules appended to the frame <style>'),
+        ds_base_url: z
+          .string()
+          .optional()
+          .describe('Optional trusted DS base URL (defaults to same-origin /ds/specflow/latest)'),
+        agent_name: agentName,
+      },
+    },
+    async ({ frame_id, jsx, theme, extra_css, ds_base_url, agent_name }) => {
+      const current = frameFor(frame_id, 'edit')
+      if (!current) return noFrame(frame_id)
+      let html: string
+      try {
+        html = await wrapSpecFlowJsxHtml(jsx, {
+          theme: theme ?? 'light',
+          title: current.name || frame_id,
+          extraCss: extra_css,
+          dsBaseUrl: ds_base_url,
+        })
+      } catch (e) {
+        return err(`SpecFlow JSX compilation failed: ${e instanceof Error ? e.message : String(e)}`)
+      }
+      const frame = actions.updateFrame(frame_id, { html }, actorFrom(agent_name), { replace: true })
+      if (!frame) return noFrame(frame_id)
+      return withPreview(
+        withGuidelinesNudge(
+          withStatusNudge(
+            withFeedback(
+              textWithNudge({ ok: true, frame: frameSummary(frame) }, REVIEW_NUDGE),
+              frame.canvasId,
+              actorFrom(agent_name),
+            ),
+            frame.canvasId,
+            actorFrom(agent_name),
+          ),
+          frame.canvasId,
+          actorFrom(agent_name),
+        ),
+        frame.canvasId,
+        [frame],
+      )
+    },
   )
 
   server.registerTool(

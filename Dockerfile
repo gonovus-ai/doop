@@ -42,7 +42,7 @@ WORKDIR /app
 # as empty boxes and ↗ as an emoji), Noto Color Emoji for emoji.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends chromium \
-    fonts-liberation fonts-dejavu-core fonts-noto-color-emoji \
+    fonts-liberation fonts-dejavu-core fonts-noto-color-emoji fonts-noto-cjk \
   && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
@@ -55,6 +55,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY server ./server
 COPY shared ./shared
+
+RUN node --input-type=module -e "import { transform, version } from 'esbuild'; const out = await transform('function App(){ return <div />; }', { loader: 'jsx', jsx: 'transform', jsxFactory: 'React.createElement', jsxFragment: 'React.Fragment', target: 'es2020' }); if (!out.code.includes('React.createElement')) process.exit(1); console.log('specflow esbuild runtime OK:', version);"
 
 EXPOSE 4400
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://localhost:'+process.env.PORT+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
