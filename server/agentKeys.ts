@@ -98,8 +98,8 @@ export async function deleteAgentKey(userId: string, id: string): Promise<boolea
 const touched = new Map<string, number>()
 const TOUCH_INTERVAL_MS = 60_000
 
-/** The MCP gate: a valid secret resolves to the account it acts as. */
-export async function verifyAgentKey(secret: string): Promise<{ userId: string } | null> {
+/** The MCP gate: a valid secret resolves to the account it acts as, plus the key id. */
+export async function verifyAgentKey(secret: string): Promise<{ userId: string; keyId: string } | null> {
   if (!/^dpk_[\w-]{20,}$/.test(secret)) return null
   const [key] = await db
     .select({ id: agentKeys.id, userId: agentKeys.userId })
@@ -114,5 +114,11 @@ export async function verifyAgentKey(secret: string): Promise<{ userId: string }
       .where(eq(agentKeys.id, key.id))
       .catch((err: unknown) => console.error('[agent-keys] lastUsedAt write failed', err))
   }
-  return { userId: key.userId }
+  return { userId: key.userId, keyId: key.id }
+}
+
+/** Look up who owns an agent key id (null when the key does not exist or was revoked). */
+export async function findAgentKeyOwner(keyId: string): Promise<string | null> {
+  const [row] = await db.select({ userId: agentKeys.userId }).from(agentKeys).where(eq(agentKeys.id, keyId))
+  return row?.userId ?? null
 }

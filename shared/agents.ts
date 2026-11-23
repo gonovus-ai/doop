@@ -27,6 +27,11 @@ export interface AgentRole {
    *  built in: its id is the handle people @mention, and it answers to
    *  nothing else, since a name typed by a person need not be a word */
   custom?: boolean
+  /** true when this agent is an external webhook + MCP agent rather than run
+   *  by Doop's built-in resident runner */
+  external?: boolean
+  /** optional uploaded /a/<id>.<ext> avatar URL */
+  avatar?: string
   /** a built-in agent whose instructions its team rewrote: the resident sets
    *  them apart as it does a custom agent's (shared/customAgents.ts) */
   briefByTeam?: boolean

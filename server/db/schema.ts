@@ -437,6 +437,9 @@ export const comments = pgTable(
     resolvedBy: text('resolved_by'),
     resolvedAt: bigint('resolved_at', { mode: 'number' }),
     parentId: text('parent_id'),
+    /** external agent webhook push status: 'pending' | 'delivered' | 'failed' */
+    deliveryStatus: text('delivery_status'),
+    deliveredAt: bigint('delivered_at', { mode: 'number' }),
   },
   (t) => [index('comments_canvas_idx').on(t.canvasId)],
 )
@@ -525,6 +528,16 @@ export const customAgents = pgTable(
     blurb: text('blurb').notNull(),
     brief: text('brief').notNull(),
     reviewer: boolean('reviewer').notNull().default(false),
+    /** true when this agent runs externally via webhook push + MCP instead of Doop's built-in resident runner */
+    external: boolean('external').notNull().default(false),
+    /** optional uploaded /a/<id>.<ext> avatar URL */
+    avatar: text('avatar'),
+    /** optional bound agent_keys.id so MCP calls with that key act as this agent */
+    agentKeyId: text('agent_key_id'),
+    /** webhook URL where Doop POSTs signed events addressed to this external agent */
+    webhookUrl: text('webhook_url'),
+    /** HMAC-SHA256 signing secret (encrypted at rest via secretBox) */
+    webhookSecret: sealedText('webhook_secret'),
     createdBy: text('created_by').notNull(),
     createdAt: bigint('created_at', { mode: 'number' }).notNull(),
     updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
@@ -532,6 +545,7 @@ export const customAgents = pgTable(
   (t) => [
     uniqueIndex('custom_agents_scope_handle_idx').on(t.scope, t.handle),
     uniqueIndex('custom_agents_scope_name_idx').on(t.scope, t.name),
+    index('custom_agents_agent_key_idx').on(t.agentKeyId),
   ],
 )
 

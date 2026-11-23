@@ -153,6 +153,7 @@ const schema = {
 
   /* ------------------------------------------------------ webhooks */
   WEBHOOK_ALLOW_PRIVATE_URLS: bool({ default: false }),
+  EXTERNAL_AGENT_RETRY_DELAYS_MS: str({ default: undefined }),
 
   /* ------------------------------------------------ resident agents */
   DOOP_AGENT_PROVIDER: str({ choices: ['anthropic', 'azure'], default: 'anthropic' }),

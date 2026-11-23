@@ -1,5 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { colorFor } from '../../shared/types'
+import { DEFAULT_ROLE_NAME, roleByAgentName } from '../../shared/agents'
+import { useRoster } from '../hooks/use-roster'
 import { canCommentOpenCanvas, useStore } from '../lib/store'
 import { api } from '../lib/api'
 import { posthog } from '../lib/posthog'
@@ -11,9 +13,10 @@ import { cn } from '@/lib/utils'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { PanelBody } from './ui/panel'
-import { CheckIcon, LinkIcon } from './ui/icons'
+import { CheckIcon, LinkIcon, SparkIcon } from './ui/icons'
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } from './ui/context-menu'
 import { MentionText, useMentionPicker } from './MentionPicker'
+import { RoleMark } from './RoleMark'
 import { copyCommentLink } from '../lib/commentLink'
 import { Disclosure } from './ui/collapsible'
 import { isResidentLimit } from './TeamAllowance'
@@ -107,7 +110,10 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
   const resolved = threadState(thread) === 'resolved'
   /* a view link reads threads; it neither replies nor resolves */
   const canComment = useStore(canCommentOpenCanvas)
+  const roster = useRoster()
   const t = useT()
+  const rootRole = roleByAgentName(root.from, roster)
+  const latestAgentItem = [...[root, ...thread.replies]].reverse().find((x) => x.forAgent && !x.resolvedAt)
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -173,13 +179,17 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
             className="grid cursor-pointer grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-[2px] rounded-[8px] px-1.5 py-2 text-[12px] leading-[18px] hover:bg-sub focus-visible:bg-sub focus-visible:outline-none"
           >
             <span className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
-              <span
-                aria-hidden
-                className="grid size-4 flex-none place-items-center rounded-full text-[8px] leading-none font-medium text-white"
-                style={{ background: colorFor(root.from) }}
-              >
-                {root.from.slice(0, 1).toUpperCase()}
-              </span>
+              {rootRole ? (
+                <RoleMark role={rootRole} size={16} />
+              ) : (
+                <span
+                  aria-hidden
+                  className="grid size-4 flex-none place-items-center rounded-full text-[8px] leading-none font-medium text-white"
+                  style={{ background: colorFor(root.from) }}
+                >
+                  {root.from.slice(0, 1).toUpperCase()}
+                </span>
+              )}
               <b className="truncate font-medium text-ink">{root.from}</b>
             </span>
             <span className="text-[11px] text-ink-faint tabular-nums">{timeAgo(root.at)}</span>
@@ -188,6 +198,46 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
             <span className={cn('col-span-2 min-w-0 break-words pl-[22px] text-ink-soft', !resolved && 'line-clamp-3')}>
               <MentionText text={root.text} />
             </span>
+            {!resolved && latestAgentItem && (
+              <span
+                className={cn(
+                  'col-span-2 flex min-w-0 items-center gap-1 pl-[22px] text-[11px] font-medium',
+                  latestAgentItem.failedAt || latestAgentItem.deliveryStatus === 'failed'
+                    ? 'text-accent-ink'
+                    : 'text-brand',
+                )}
+              >
+                {latestAgentItem.deliveryStatus === 'failed' ? (
+                  <span className="truncate">
+                    {t('stage.deliveryFailed')}
+                    {latestAgentItem.failureReason ? ` · ${latestAgentItem.failureReason}` : ''}
+                  </span>
+                ) : latestAgentItem.failedAt ? (
+                  <span className="truncate">
+                    {t('stage.agentStopped', { name: latestAgentItem.targetAgent ?? DEFAULT_ROLE_NAME })}
+                  </span>
+                ) : latestAgentItem.claimedBy ? (
+                  <>
+                    <SparkIcon size={11} />
+                    <span className="truncate">{t('stage.isOnIt', { name: latestAgentItem.claimedBy })}</span>
+                  </>
+                ) : latestAgentItem.deliveryStatus === 'delivered' ? (
+                  <>
+                    <CheckIcon size={11} />
+                    <span className="truncate">
+                      {t('stage.deliveredTo', { name: latestAgentItem.targetAgent ?? DEFAULT_ROLE_NAME })}
+                    </span>
+                  </>
+                ) : latestAgentItem.deliveryStatus === 'pending' ? (
+                  <>
+                    <SparkIcon size={11} />
+                    <span className="truncate">
+                      {t('stage.deliveringTo', { name: latestAgentItem.targetAgent ?? DEFAULT_ROLE_NAME })}
+                    </span>
+                  </>
+                ) : null}
+              </span>
+            )}
             {(frame || resolved) && (
               <span className="col-span-2 flex min-w-0 items-center gap-[7px] pl-[22px] text-[11px] text-ink-faint">
                 {resolved && (
@@ -223,17 +273,23 @@ function ThreadRow({ thread }: { thread: CommentThreadGroup }) {
           className="py-1 pr-1.5 pl-[28px] text-label text-ink-soft"
         >
           <ol className="space-y-3" aria-label={t('stage.resolvedReplies')}>
-            {thread.replies.map((reply) => (
-              <li key={reply.id}>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate font-medium text-ink">{reply.from}</span>
-                  <span className="shrink-0 text-caption text-ink-faint">{timeAgo(reply.at)}</span>
-                </div>
-                <p className="whitespace-pre-wrap break-words">
-                  <MentionText text={reply.text} />
-                </p>
-              </li>
-            ))}
+            {thread.replies.map((reply) => {
+              const replyRole = roleByAgentName(reply.from, roster)
+              return (
+                <li key={reply.id}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      {replyRole && <RoleMark role={replyRole} size={14} />}
+                      <span className="truncate font-medium text-ink">{reply.from}</span>
+                    </span>
+                    <span className="shrink-0 text-caption text-ink-faint">{timeAgo(reply.at)}</span>
+                  </div>
+                  <p className="whitespace-pre-wrap break-words">
+                    <MentionText text={reply.text} />
+                  </p>
+                </li>
+              )
+            })}
           </ol>
         </Disclosure>
       )}

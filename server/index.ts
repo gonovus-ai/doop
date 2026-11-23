@@ -2934,8 +2934,10 @@ app.post('/api/frames/:id/comments', async (req, res) => {
     : { ids: [], roleText: text }
   if (refuseAgentMention(req, res, frame.canvasId, mentions.roleText)) return
   /* a comment that @mentions a resident agent is a new command to the team,
-     so it's metered like a card; plain comments and replies stay free */
-  if (mentionedRole(mentions.roleText, actions.canvasRoster(frame.canvasId))) {
+     so it's metered like a card; plain comments, replies, and external webhook
+     agents stay free */
+  const mentioned = mentionedRole(mentions.roleText, actions.canvasRoster(frame.canvasId))
+  if (mentioned && !mentioned.external) {
     const gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
@@ -2983,7 +2985,8 @@ app.post('/api/canvases/:id/comments', async (req, res) => {
   const mentions = await resolveCommentMentions(canvas, body, { picked: req.body?.mentions })
   if (refuseAgentMention(req, res, canvas.id, mentions.roleText)) return
   let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
-  if (mentionedRole(mentions.roleText, actions.canvasRoster(canvas.id))) {
+  const mentioned = mentionedRole(mentions.roleText, actions.canvasRoster(canvas.id))
+  if (mentioned && !mentioned.external) {
     gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
@@ -3022,9 +3025,10 @@ app.post('/api/comments/:id/replies', async (req, res) => {
     picked: req.body?.mentions,
   })
   if (refuseAgentMention(req, res, found.canvasId, mentions.roleText)) return
-  /* same rule as a fresh comment: only an @mention costs a resident task */
+  /* same rule as a fresh comment: only an @mention of a resident agent costs a task */
   let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
-  if (mentionedRole(mentions.roleText, actions.canvasRoster(found.canvasId))) {
+  const mentioned = mentionedRole(mentions.roleText, actions.canvasRoster(found.canvasId))
+  if (mentioned && !mentioned.external) {
     gate = await allowance.consumeResidentTask(req.user!.id)
     if (!gate.ok) {
       return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
@@ -3083,9 +3087,14 @@ app.post('/api/comments/:id/retry', async (req, res) => {
   const found = actions.findComment(req.params.id)
   if (!found) return res.status(404).json({ error: 'comment not found' })
   if (!requireCanvas(req, res, found.canvasId, 'edit')) return
-  const gate = await allowance.consumeResidentTask(req.user!.id)
-  if (!gate.ok) {
-    return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
+  const targetRole = found.targetAgent
+    ? actions.canvasRoster(found.canvasId).find((r) => r.name.toLowerCase() === found.targetAgent!.toLowerCase())
+    : undefined
+  if (!targetRole?.external) {
+    const gate = await allowance.consumeResidentTask(req.user!.id)
+    if (!gate.ok) {
+      return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
+    }
   }
   res.json(actions.retryComment(req.params.id, req.user!.name))
 })
@@ -3207,9 +3216,15 @@ app.post('/api/canvases/:id/cards', async (req, res) => {
   if (!requireCanvas(req, res, req.params.id, 'edit')) return
   const title = String(req.body?.title ?? '').trim()
   if (!title) return res.status(400).json({ error: 'empty title' })
-  const gate = await allowance.consumeResidentTask(req.user!.id)
-  if (!gate.ok) {
-    return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
+  const roster = actions.canvasRoster(req.params.id)
+  const requestedAgents = Array.isArray(req.body?.agents) ? (req.body.agents as unknown[]).map(String) : []
+  const allExternal =
+    requestedAgents.length > 0 && requestedAgents.every((id) => roster.find((r) => r.id === id)?.external === true)
+  if (!allExternal) {
+    const gate = await allowance.consumeResidentTask(req.user!.id)
+    if (!gate.ok) {
+      return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
+    }
   }
   const card = actions.addQueuedCard(
     req.params.id,
@@ -3256,9 +3271,15 @@ app.post('/api/tasks/:id/feedback', async (req, res) => {
   if (!requireCanvas(req, res, canvasId, 'edit')) return
   const text = String(req.body?.text ?? '').trim()
   if (!text) return res.status(400).json({ error: 'empty text' })
-  const gate = await allowance.consumeResidentTask(req.user!.id)
-  if (!gate.ok) {
-    return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
+  const task = actions.getTasks(canvasId).find((t) => t.id === req.params.id)
+  const taskRole = task
+    ? actions.canvasRoster(canvasId).find((r) => r.name.toLowerCase() === task.agentName.toLowerCase())
+    : undefined
+  if (!taskRole?.external) {
+    const gate = await allowance.consumeResidentTask(req.user!.id)
+    if (!gate.ok) {
+      return res.status(403).json({ error: 'resident_limit', used: gate.used, limit: gate.limit })
+    }
   }
   const fb = actions.addTaskFeedback(req.params.id, req.user!.name, text, req.user!.id)
   if (!fb) return res.status(404).json({ error: 'task not found or empty text' })

@@ -28,6 +28,20 @@ import {
 type AgentRow = typeof t.customAgents.$inferSelect
 type OverrideRow = typeof t.agentOverrides.$inferSelect
 
+/** Full server-side external agent record (includes decrypted webhookSecret; never serialize directly to clients). */
+export interface ExternalAgentRecord {
+  id: string
+  scope: string
+  handle: string
+  name: string
+  color: string
+  blurb: string
+  avatar: string | null
+  agentKeyId: string | null
+  webhookUrl: string | null
+  webhookSecret: string | null
+}
+
 const rows = new Map<string, AgentRow>()
 /** by `overrideKey(scope, roleId)` */
 const overrides = new Map<string, OverrideRow>()
@@ -37,6 +51,25 @@ function overrideKey(scope: string, roleId: string): string {
 }
 
 export class AgentInputError extends Error {}
+
+function newWebhookSecret(): string {
+  return `whsec_${nanoid(32)}`
+}
+
+function toExternalRecord(row: AgentRow): ExternalAgentRecord {
+  return {
+    id: row.id,
+    scope: row.scope,
+    handle: row.handle,
+    name: row.name,
+    color: row.color,
+    blurb: row.blurb,
+    avatar: row.avatar,
+    agentKeyId: row.agentKeyId,
+    webhookUrl: row.webhookUrl,
+    webhookSecret: row.webhookSecret,
+  }
+}
 
 export async function hydrateCustomAgents(): Promise<void> {
   const [all, changed] = await Promise.all([db.select().from(t.customAgents), db.select().from(t.agentOverrides)])
@@ -83,6 +116,11 @@ function toAgent(row: AgentRow): CustomAgent {
     blurb: row.blurb,
     brief: row.brief,
     ...(row.reviewer ? { reviewer: true } : {}),
+    ...(row.external ? { external: true } : {}),
+    ...(row.avatar ? { avatar: row.avatar } : {}),
+    ...(row.external && row.agentKeyId ? { agentKeyId: row.agentKeyId } : {}),
+    ...(row.external && row.webhookUrl ? { webhookUrl: row.webhookUrl } : {}),
+    ...(row.external ? { hasWebhookSecret: !!row.webhookSecret } : {}),
     custom: true,
     createdAt: row.createdAt,
   }
@@ -96,6 +134,27 @@ export function listCustomAgents(scope: AgentScope, userId: string): CustomAgent
   return rowsIn(scopeKey(scope, userId)).map(toAgent)
 }
 
+export function isExternalAgentRow(scope: AgentScope, userId: string, handle: string): boolean {
+  return findRow(scopeKey(scope, userId), handle)?.external === true
+}
+
+export function getExternalAgentRecord(
+  scope: AgentScope,
+  userId: string,
+  handle: string,
+): ExternalAgentRecord | undefined {
+  const row = findRow(scopeKey(scope, userId), handle)
+  return row?.external ? toExternalRecord(row) : undefined
+}
+
+/** Find the external agent bound to a specific agent key id (for /mcp bearer auth). */
+export function findExternalAgentByKeyId(keyId: string): ExternalAgentRecord | undefined {
+  for (const row of rows.values()) {
+    if (row.external && row.agentKeyId === keyId) return toExternalRecord(row)
+  }
+  return undefined
+}
+
 /** The scope a canvas takes its agents from: its workspace's, or its owner's. */
 function canvasScopeKey(canvas: { workspaceId?: string | null; ownerId?: string | null }): string | undefined {
   if (canvas.workspaceId) return `ws:${canvas.workspaceId}`
@@ -107,12 +166,50 @@ export function customAgentsForCanvas(canvas: { workspaceId?: string | null; own
   return key ? rowsIn(key).map(toAgent) : []
 }
 
+export function externalAgentsForCanvas(canvas: {
+  workspaceId?: string | null
+  ownerId?: string | null
+}): ExternalAgentRecord[] {
+  const key = canvasScopeKey(canvas)
+  return key
+    ? rowsIn(key)
+        .filter((row) => row.external)
+        .map(toExternalRecord)
+    : []
+}
+
+/** Match an external agent on a canvas by handle or display name (case-insensitive). */
+export function findExternalAgentOnCanvas(
+  canvas: { workspaceId?: string | null; ownerId?: string | null },
+  handleOrName: string,
+): ExternalAgentRecord | undefined {
+  const needle = handleOrName.trim().replace(/^@+/, '').toLowerCase()
+  if (!needle) return undefined
+  return externalAgentsForCanvas(canvas).find(
+    (a) => a.handle.toLowerCase() === needle || a.name.toLowerCase() === needle,
+  )
+}
+
 /** A canvas's team as its viewers get it (the canvas GET, the room):
- *  everything the mention picker and the marks need, but no instructions,
- *  which stay with the people who manage the agents (anyone with a view link
- *  would read them otherwise). */
+ *  everything the mention picker and the marks need, but no instructions or
+ *  external webhook configuration, which stay with the people who manage the
+ *  agents (anyone with a view link would read them otherwise). */
 export function teamOfCanvas(canvas: { workspaceId?: string | null; ownerId?: string | null }): AgentRole[] {
-  return rosterFor(canvas).map(({ briefByTeam: _briefByTeam, ...role }) => ({ ...role, brief: '' }))
+  return rosterFor(canvas).map((role) => {
+    const clean: AgentRole = {
+      id: role.id,
+      name: role.name,
+      color: role.color,
+      blurb: role.blurb,
+      brief: '',
+      ...(role.reviewer ? { reviewer: true } : {}),
+      ...(role.aliases ? { aliases: role.aliases } : {}),
+      ...(role.custom ? { custom: true } : {}),
+      ...(role.external ? { external: true } : {}),
+      ...(role.avatar ? { avatar: role.avatar } : {}),
+    }
+    return clean
+  })
 }
 
 /** The team a canvas's work is addressed with: the built-in agents its team
@@ -158,6 +255,13 @@ export async function createCustomAgent(
       throw new AgentInputError(`@${input.handle} is already taken here`)
     if (existing.some((r) => r.name.toLowerCase() === input.name.toLowerCase()))
       throw new AgentInputError(`${input.name} is already on the team`)
+    const external = input.external === true
+    const agentKeyId = external ? (input.agentKeyId ?? null) : null
+    if (agentKeyId) {
+      const conflict = findExternalAgentByKeyId(agentKeyId)
+      if (conflict) throw new AgentInputError(`that API key is already bound to ${conflict.name}`)
+    }
+    const webhookSecret = external ? input.webhookSecret?.trim() || newWebhookSecret() : null
     const now = Date.now()
     const row: AgentRow = {
       id: nanoid(10),
@@ -168,13 +272,19 @@ export async function createCustomAgent(
       blurb: input.blurb,
       brief: input.brief,
       reviewer: input.reviewer,
+      external,
+      avatar: input.avatar ?? null,
+      agentKeyId,
+      webhookUrl: external ? (input.webhookUrl ?? null) : null,
+      webhookSecret,
       createdBy: userId,
       createdAt: now,
       updatedAt: now,
     }
     await db.insert(t.customAgents).values(row)
     rows.set(row.id, row)
-    return toAgent(row)
+    /* return the webhook signing secret once on creation */
+    return webhookSecret ? { ...toAgent(row), webhookSecret } : toAgent(row)
   })
 }
 
@@ -194,7 +304,25 @@ export async function updateCustomAgent(
   return inScopeOrder(key, async () => {
     const row = findRow(key, handle)
     if (!row || !allowed()) return undefined
-    const next: AgentRow = { ...row, ...patch, updatedAt: Date.now() }
+    const nextAgentKeyId = row.external && 'agentKeyId' in patch ? (patch.agentKeyId ?? null) : row.agentKeyId
+    if (nextAgentKeyId && nextAgentKeyId !== row.agentKeyId) {
+      const conflict = findExternalAgentByKeyId(nextAgentKeyId)
+      if (conflict && conflict.id !== row.id) {
+        throw new AgentInputError(`that API key is already bound to ${conflict.name}`)
+      }
+    }
+    const next: AgentRow = {
+      ...row,
+      color: patch.color ?? row.color,
+      blurb: patch.blurb ?? row.blurb,
+      brief: patch.brief ?? row.brief,
+      reviewer: patch.reviewer ?? row.reviewer,
+      avatar: 'avatar' in patch ? (patch.avatar ?? null) : row.avatar,
+      agentKeyId: nextAgentKeyId,
+      webhookUrl: row.external && 'webhookUrl' in patch ? (patch.webhookUrl ?? null) : row.webhookUrl,
+      webhookSecret: row.external && patch.webhookSecret ? patch.webhookSecret : row.webhookSecret,
+      updatedAt: Date.now(),
+    }
     await db
       .update(t.customAgents)
       .set({
@@ -202,11 +330,57 @@ export async function updateCustomAgent(
         blurb: next.blurb,
         brief: next.brief,
         reviewer: next.reviewer,
+        avatar: next.avatar,
+        agentKeyId: next.agentKeyId,
+        webhookUrl: next.webhookUrl,
+        webhookSecret: next.webhookSecret,
         updatedAt: next.updatedAt,
       })
       .where(eq(t.customAgents.id, row.id))
     rows.set(row.id, next)
     return toAgent(next)
+  })
+}
+
+export async function setCustomAgentAvatar(
+  scope: AgentScope,
+  userId: string,
+  handle: string,
+  avatar: string | null,
+  allowed: () => boolean,
+): Promise<CustomAgent | undefined> {
+  const key = scopeKey(scope, userId)
+  return inScopeOrder(key, async () => {
+    const row = findRow(key, handle)
+    if (!row || !allowed()) return undefined
+    const next: AgentRow = { ...row, avatar, updatedAt: Date.now() }
+    await db
+      .update(t.customAgents)
+      .set({ avatar: next.avatar, updatedAt: next.updatedAt })
+      .where(eq(t.customAgents.id, row.id))
+    rows.set(row.id, next)
+    return toAgent(next)
+  })
+}
+
+export async function rotateExternalAgentSecret(
+  scope: AgentScope,
+  userId: string,
+  handle: string,
+  allowed: () => boolean,
+): Promise<{ agent: CustomAgent; webhookSecret: string } | undefined> {
+  const key = scopeKey(scope, userId)
+  return inScopeOrder(key, async () => {
+    const row = findRow(key, handle)
+    if (!row || !row.external || !allowed()) return undefined
+    const webhookSecret = newWebhookSecret()
+    const next: AgentRow = { ...row, webhookSecret, updatedAt: Date.now() }
+    await db
+      .update(t.customAgents)
+      .set({ webhookSecret, updatedAt: next.updatedAt })
+      .where(eq(t.customAgents.id, row.id))
+    rows.set(row.id, next)
+    return { agent: toAgent(next), webhookSecret }
   })
 }
 

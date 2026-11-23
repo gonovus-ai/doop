@@ -37,10 +37,12 @@ import {
   mentionedRole,
   normalizePipeline,
   roleByAgentName,
+  roleById,
   roleName,
   type Roster,
 } from '../shared/agents.ts'
-import { rosterFor, teamOfCanvas } from './customAgents.ts'
+import { externalAgentsForCanvas, findExternalAgentOnCanvas, rosterFor, teamOfCanvas } from './customAgents.ts'
+import { dispatchExternalCard, dispatchExternalComment, dispatchExternalFeedback } from './externalAgents.ts'
 import { canvasPages } from '../shared/pages.ts'
 import { FRAME_COMMENT_SELECTOR, isCanvasComment, type CommentAnchorInput } from '../shared/comments.ts'
 import { isElementId } from '../shared/elementId.ts'
@@ -352,10 +354,18 @@ function stageAgent(task: AgentTask, roster: Roster): string {
   return roleName(pipeline[Math.min(task.stage ?? 0, pipeline.length - 1)], roster)
 }
 
+/** Whether a role name or id on this roster is an external webhook agent
+ *  (never claimed or run by Doop's built-in resident runner). */
+function isExternalAgentName(name: string | undefined, roster: Roster): boolean {
+  if (!name) return false
+  return roleByAgentName(name, roster)?.external === true
+}
+
 /** Distinct resident agents with work waiting, in the order work arrived. */
 export function pendingWorkAgents(canvasId: string): string[] {
   const names: string[] = []
   const add = (name: string) => {
+    if (isExternalAgentName(name, roster)) return
     if (!names.includes(name)) names.push(name)
   }
   const roster = canvasRoster(canvasId)
@@ -419,6 +429,8 @@ export function nextWork(canvasId: string, agentName: string, skip?: ReadonlySet
 
 /** The oldest claimable work the predicate does not pass over. */
 function oldestWork(canvasId: string, agentName: string, passOver: (work: NextWork) => boolean): NextWork | undefined {
+  const roster = canvasRoster(canvasId)
+  if (isExternalAgentName(agentName, roster)) return undefined
   let oldest: { at: number; work: NextWork } | undefined
   const consider = (at: number, userId: string | undefined, runner: RunnerPick | undefined) => {
     const payer = userId ?? ''
@@ -426,7 +438,6 @@ function oldestWork(canvasId: string, agentName: string, passOver: (work: NextWo
     if (passOver({ payer, key })) return
     if (!oldest || at < oldest.at) oldest = { at, work: { payer, ...(runner ? { runner } : {}), key } }
   }
-  const roster = canvasRoster(canvasId)
   for (const card of taskLog.get(canvasId) ?? []) {
     if (card.queuedBy && !card.agentName && !card.failedAt && !card.endedAt && stageAgent(card, roster) === agentName) {
       consider(card.startedAt, card.queuedByUserId, card.runner)
@@ -554,7 +565,9 @@ export function addTaskFeedback(
     if (!task) continue
     /* a reply goes back to the agent whose work it is about — unless that was
        an outside agent, in which case it stays open to whoever shows up */
-    const target = roleByAgentName(task.agentName, canvasRoster(canvasId))?.name
+    const roster = canvasRoster(canvasId)
+    const targetRole = roleByAgentName(task.agentName, roster)
+    const target = targetRole?.name
     const fb: TaskFeedback = {
       id: nanoid(8),
       taskId,
@@ -571,12 +584,18 @@ export function addTaskFeedback(
     prepend(feedbackLog, canvasId, fb)
     stored.saveFeedback(fb)
     broadcast(canvasId, { type: 'feedback', feedback: fb })
-    /* resident Doop agent picks feedback up instantly (no-op without an API
-       key). Dynamic import: resident depends on this module. Feedback on an
-       outside agent's work is that agent's for a minute: the residents hear
-       again when it is open to them. */
-    kickResident(canvasId)
-    if (fb.agentKey) afterCommit(() => setTimeout(() => kickResident(canvasId), OWNER_FIRST_MS).unref())
+    const canvas = store.getCanvas(canvasId)
+    const externalAgent = targetRole?.external && canvas ? findExternalAgentOnCanvas(canvas, targetRole.id) : undefined
+    if (externalAgent) {
+      afterCommit(() => dispatchExternalFeedback(canvasId, task, fb, externalAgent))
+    } else {
+      /* resident Doop agent picks feedback up instantly (no-op without an API
+         key). Dynamic import: resident depends on this module. Feedback on an
+         outside agent's work is that agent's for a minute: the residents hear
+         again when it is open to them. */
+      kickResident(canvasId)
+      if (fb.agentKey) afterCommit(() => setTimeout(() => kickResident(canvasId), OWNER_FIRST_MS).unref())
+    }
     logActivity(
       canvasId,
       resolveActor({ name: from, kind: 'user' }),
@@ -1141,14 +1160,46 @@ function postComment(
 ): ElementComment | undefined {
   const clean = text.trim()
   if (!clean) return undefined
-  /* @Doop, @brand, @a11y… — whichever resident agent is mentioned picks it
-     up; a person's name (`@Brand Smith`) is not an agent's */
-  const mentioned = mentionedRole(mentions?.roleText ?? clean, canvasRoster(canvasId))
+  /* @Doop, @brand, @a11y, or a registered external agent — whichever agent is
+     mentioned picks it up; a person's name (`@Brand Smith`) is not an agent's */
+  const roster = canvasRoster(canvasId)
+  const canvas = store.getCanvas(canvasId)
+  const mentioned = mentionedRole(mentions?.roleText ?? clean, roster)
   const list = commentLog.get(canvasId) ?? []
   /* strictly increasing per canvas: thread order is reconstructed from `at`
      after a restart, so two messages must never share a timestamp */
   const at = Math.max(Date.now(), (list[0]?.at ?? 0) + 1)
   const frame = 'frame' in anchor ? anchor.frame : undefined
+
+  /* Determine whether this comment/reply should push to an external agent:
+     1) direct @mention of an external agent (avoiding self-loops), OR
+     2) a reply in a thread an external agent previously participated in */
+  const fromLower = from.toLowerCase()
+  const directExternal =
+    mentioned?.external && canvas && mentioned.name.toLowerCase() !== fromLower
+      ? findExternalAgentOnCanvas(canvas, mentioned.id)
+      : undefined
+  const threadExternals =
+    !mentioned && parentId && canvas
+      ? (() => {
+          const allExternal = externalAgentsForCanvas(canvas)
+          if (!allExternal.length) return []
+          const existingThread = [...list].reverse().filter((c) => c.id === parentId || c.parentId === parentId)
+          const matched: typeof allExternal = []
+          for (const item of [...existingThread].reverse()) {
+            const candidates = [item.targetAgent, item.from].filter((s): s is string => !!s)
+            for (const candidate of candidates) {
+              const lower = candidate.toLowerCase()
+              if (lower === fromLower) continue
+              const ext = allExternal.find((a) => a.name.toLowerCase() === lower || a.handle.toLowerCase() === lower)
+              if (ext && !matched.some((m) => m.id === ext.id)) matched.push(ext)
+            }
+          }
+          return matched
+        })()
+      : []
+
+  const primaryExternal = directExternal ?? threadExternals[0]
   const comment: ElementComment = {
     id: nanoid(8),
     canvasId,
@@ -1157,7 +1208,11 @@ function postComment(
     ...(fromUserId ? { fromUserId } : {}),
     text: clean,
     at,
-    ...(mentioned ? { forAgent: true, targetAgent: mentioned.name } : {}),
+    ...(primaryExternal
+      ? { forAgent: true, targetAgent: primaryExternal.name, deliveryStatus: 'pending' as const }
+      : mentioned && !mentioned.external
+        ? { forAgent: true, targetAgent: mentioned.name }
+        : {}),
     ...(parentId ? { parentId } : {}),
   }
   prepend(commentLog, canvasId, comment)
@@ -1175,7 +1230,28 @@ function postComment(
         : `commented on the canvas: “${excerpt}”`,
     frame?.id,
   )
-  if (comment.forAgent) {
+  if (directExternal) {
+    afterCommit(() =>
+      dispatchExternalComment(canvasId, comment, 'agent.comment_mentioned', directExternal, {
+        frame,
+        actorKind: kind,
+        onDelivered: markCommentDelivered,
+        onFailed: failCommentDelivery,
+      }),
+    )
+  } else if (threadExternals.length > 0) {
+    afterCommit(() => {
+      threadExternals.forEach((ext, idx) => {
+        dispatchExternalComment(canvasId, comment, 'agent.thread_replied', ext, {
+          frame,
+          actorKind: kind,
+          trackStatus: idx === 0,
+          onDelivered: markCommentDelivered,
+          onFailed: failCommentDelivery,
+        })
+      })
+    })
+  } else if (comment.forAgent) {
     /* @Doop mention: the resident agent picks it up instantly (no-op without
        an API key). Dynamic import: resident depends on this module. */
     kickResident(canvasId)
@@ -1212,6 +1288,7 @@ export function takeAgentCommentsFor(
 ): ElementComment[] {
   if (runner) return []
   const roster = canvasRoster(canvasId)
+  if (isExternalAgentName(agentName, roster)) return []
   const pending = (commentLog.get(canvasId) ?? []).filter(
     (c) =>
       c.forAgent &&
@@ -1228,6 +1305,50 @@ export function takeAgentCommentsFor(
     broadcast(canvasId, { type: 'comment', comment: c }) // pins flip to "Doop is on it"
   }
   return pending
+}
+
+export function markCommentDelivered(commentId: string): ElementComment | undefined {
+  for (const [canvasId, list] of commentLog) {
+    const comment = list.find((c) => c.id === commentId)
+    if (!comment || comment.resolvedAt) continue
+    edit(comment).deliveryStatus = 'delivered'
+    comment.deliveredAt = Date.now()
+    delete comment.failedAt
+    delete comment.failureReason
+    stored.saveComment(comment)
+    broadcast(canvasId, { type: 'comment', comment })
+    return comment
+  }
+  return undefined
+}
+
+export function failCommentDelivery(commentId: string, reason: string): ElementComment | undefined {
+  for (const [canvasId, list] of commentLog) {
+    const comment = list.find((c) => c.id === commentId)
+    if (!comment || comment.resolvedAt) continue
+    edit(comment).deliveryStatus = 'failed'
+    comment.failedAt = Date.now()
+    comment.failureReason = reason
+    stored.saveComment(comment)
+    broadcast(canvasId, { type: 'comment', comment })
+    return comment
+  }
+  return undefined
+}
+
+export function claimExternalComment(commentId: string, agentName: string): ElementComment | undefined {
+  for (const [canvasId, list] of commentLog) {
+    const comment = list.find((c) => c.id === commentId)
+    if (!comment || comment.resolvedAt) continue
+    edit(comment).claimedBy = agentName
+    comment.claimedAt = Date.now()
+    delete comment.failedAt
+    delete comment.failureReason
+    stored.saveComment(comment)
+    broadcast(canvasId, { type: 'comment', comment })
+    return comment
+  }
+  return undefined
 }
 
 export function failComment(commentId: string, reason: string): ElementComment | undefined {
@@ -1247,16 +1368,32 @@ export function retryComment(commentId: string, by: string): ElementComment | un
   for (const [canvasId, list] of commentLog) {
     const comment = list.find((c) => c.id === commentId)
     if (!comment || comment.resolvedAt) continue
-    if (!comment.failedAt) return comment
+    if (!comment.failedAt && comment.deliveryStatus !== 'failed') return comment
+    const canvas = store.getCanvas(canvasId)
+    const externalAgent =
+      canvas && comment.targetAgent ? findExternalAgentOnCanvas(canvas, comment.targetAgent) : undefined
     edit(comment)
     delete comment.claimedBy
     delete comment.claimedAt
     delete comment.failedAt
     delete comment.failureReason
+    if (externalAgent) comment.deliveryStatus = 'pending'
     stored.saveComment(comment)
     broadcast(canvasId, { type: 'comment', comment })
     logActivity(canvasId, resolveActor({ name: by, kind: 'user' }), 'retried a comment', comment.frameId)
-    kickResident(canvasId)
+    if (externalAgent) {
+      const frame = comment.frameId ? store.getFrame(comment.frameId) : undefined
+      const eventType = comment.parentId ? 'agent.thread_replied' : 'agent.comment_mentioned'
+      afterCommit(() =>
+        dispatchExternalComment(canvasId, comment, eventType, externalAgent, {
+          frame,
+          onDelivered: markCommentDelivered,
+          onFailed: failCommentDelivery,
+        }),
+      )
+    } else {
+      kickResident(canvasId)
+    }
     return comment
   }
   return undefined
@@ -1506,13 +1643,21 @@ export function addQueuedCard(
   enqueueCards(canvasId, [card])
   stored.saveTask(canvasId, card)
   broadcast(canvasId, { type: 'task', task: card })
+  const roster = canvasRoster(canvasId)
   logActivity(
     canvasId,
     resolveActor({ name: from, kind: 'user' }),
-    `queued a card for ${pipeline.map((id) => roleName(id, canvasRoster(canvasId))).join(' → ')}: “${clean}”`,
+    `queued a card for ${pipeline.map((id) => roleName(id, roster)).join(' → ')}: “${clean}”`,
   )
-  /* the resident agents pick queued cards up instantly (no-op without a key) */
-  kickResident(canvasId)
+  const firstRole = roleById(pipeline[0], roster)
+  const canvas = store.getCanvas(canvasId)
+  const externalAgent = firstRole?.external && canvas ? findExternalAgentOnCanvas(canvas, firstRole.id) : undefined
+  if (externalAgent) {
+    afterCommit(() => dispatchExternalCard(canvasId, card, externalAgent))
+  } else {
+    /* the resident agents pick queued cards up instantly (no-op without a key) */
+    kickResident(canvasId)
+  }
   return card
 }
 
@@ -1685,8 +1830,16 @@ export function advanceCard(canvasId: string, cardId: string, by: Actor): AgentT
   delete card.failureReason
   stored.saveTask(canvasId, card)
   broadcast(canvasId, { type: 'task', task: card })
-  logActivity(canvasId, by, `handed “${card.status}” to ${roleName(pipeline[next], canvasRoster(canvasId))}`)
-  kickResident(canvasId)
+  const roster = canvasRoster(canvasId)
+  logActivity(canvasId, by, `handed “${card.status}” to ${roleName(pipeline[next], roster)}`)
+  const nextRole = roleById(pipeline[next], roster)
+  const canvas = store.getCanvas(canvasId)
+  const externalAgent = nextRole?.external && canvas ? findExternalAgentOnCanvas(canvas, nextRole.id) : undefined
+  if (externalAgent) {
+    afterCommit(() => dispatchExternalCard(canvasId, card, externalAgent))
+  } else {
+    kickResident(canvasId)
+  }
   return card
 }
 
@@ -1737,7 +1890,16 @@ export function retryCard(canvasId: string, cardId: string, by: string): AgentTa
   stored.saveTask(canvasId, card)
   broadcast(canvasId, { type: 'task', task: card })
   logActivity(canvasId, resolveActor({ name: by, kind: 'user' }), `retried a card: “${card.status}”`)
-  kickResident(canvasId)
+  const roster = canvasRoster(canvasId)
+  const pipeline = pipelineOf(card)
+  const stageRole = roleById(pipeline[Math.min(card.stage ?? 0, pipeline.length - 1)], roster)
+  const canvas = store.getCanvas(canvasId)
+  const externalAgent = stageRole?.external && canvas ? findExternalAgentOnCanvas(canvas, stageRole.id) : undefined
+  if (externalAgent) {
+    afterCommit(() => dispatchExternalCard(canvasId, card, externalAgent))
+  } else {
+    kickResident(canvasId)
+  }
   return card
 }
 

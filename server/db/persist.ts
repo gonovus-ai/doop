@@ -1088,6 +1088,8 @@ async function writeComment(c: ElementComment): Promise<void> {
     resolvedBy: c.resolvedBy ?? null,
     resolvedAt: c.resolvedAt ?? null,
     parentId: c.parentId ?? null,
+    deliveryStatus: c.deliveryStatus ?? null,
+    deliveredAt: c.deliveredAt ?? null,
   }
   await db
     .insert(t.comments)
@@ -1112,6 +1114,8 @@ async function writeComment(c: ElementComment): Promise<void> {
         failureReason: row.failureReason,
         resolvedBy: row.resolvedBy,
         resolvedAt: row.resolvedAt,
+        deliveryStatus: row.deliveryStatus,
+        deliveredAt: row.deliveredAt,
       },
     })
 }
@@ -1386,10 +1390,17 @@ export async function hydrate(): Promise<Hydrated> {
     if (row.elementId == null && row.frameId != null && row.selector && row.selector !== 'body') {
       legacyCommentSelectors.set(row.id, row.selector)
     }
-    const interrupted = row.claimedBy != null && row.resolvedAt == null && row.failedAt == null
+    /* external-agent claims (deliveryStatus != null) live outside this process,
+       so a Doop restart did not interrupt them */
+    const interrupted =
+      row.claimedBy != null && row.resolvedAt == null && row.failedAt == null && row.deliveryStatus == null
     const failedAt = row.failedAt ?? (interrupted ? now : undefined)
     const failureReason = row.failureReason ?? (interrupted ? interruptedReason : undefined)
     if (interrupted) swallow(db.update(t.comments).set({ failedAt, failureReason }).where(eq(t.comments.id, row.id)))
+    const deliveryStatus =
+      row.deliveryStatus === 'pending' || row.deliveryStatus === 'delivered' || row.deliveryStatus === 'failed'
+        ? row.deliveryStatus
+        : undefined
     list.push({
       id: row.id,
       canvasId: row.canvasId,
@@ -1413,6 +1424,8 @@ export async function hydrate(): Promise<Hydrated> {
       ...(row.resolvedBy != null ? { resolvedBy: row.resolvedBy } : {}),
       ...(row.resolvedAt != null ? { resolvedAt: row.resolvedAt } : {}),
       ...(row.parentId != null ? { parentId: row.parentId } : {}),
+      ...(deliveryStatus !== undefined ? { deliveryStatus } : {}),
+      ...(row.deliveredAt != null ? { deliveredAt: row.deliveredAt } : {}),
     })
     comments.set(row.canvasId, list)
   }

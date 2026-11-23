@@ -571,6 +571,9 @@ export interface ElementComment {
   /** set on a reply: the root comment of its thread. Replies inherit the
    *  root's anchor and are listed under its pin instead of getting their own */
   parentId?: string
+  /** outbound webhook delivery status for external agents */
+  deliveryStatus?: 'pending' | 'delivered' | 'failed'
+  deliveredAt?: number
 }
 
 export interface ActivityItem {

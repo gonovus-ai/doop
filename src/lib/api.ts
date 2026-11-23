@@ -482,6 +482,25 @@ export const api = {
     }),
   deleteCustomAgent: (handle: string, workspaceId?: string) =>
     req<{ ok: true }>(`/api/agents/${encodeURIComponent(handle)}${agentScope(workspaceId)}`, { method: 'DELETE' }),
+  uploadAgentAvatar: (handle: string, file: File, workspaceId?: string) =>
+    req<CustomAgent>(`/api/agents/${encodeURIComponent(handle)}/avatar${agentScope(workspaceId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    }),
+  removeAgentAvatar: (handle: string, workspaceId?: string) =>
+    req<CustomAgent>(`/api/agents/${encodeURIComponent(handle)}/avatar${agentScope(workspaceId)}`, {
+      method: 'DELETE',
+    }),
+  rotateAgentWebhookSecret: (handle: string, workspaceId?: string) =>
+    req<{ ok: true; agent: CustomAgent; webhookSecret: string }>(
+      `/api/agents/${encodeURIComponent(handle)}/rotate-secret${agentScope(workspaceId)}`,
+      { method: 'POST' },
+    ),
+  testAgentWebhook: (handle: string, workspaceId?: string) =>
+    req<WebhookDeliveryResult>(`/api/agents/${encodeURIComponent(handle)}/test${agentScope(workspaceId)}`, {
+      method: 'POST',
+    }),
   /** skills: a workspace's, or without one the signed-in person's own */
   listSkills: (workspaceId?: string) => req<Skill[]>(`/api/skills${agentScope(workspaceId)}`),
   /** The skills a request on this canvas can name (handle and description

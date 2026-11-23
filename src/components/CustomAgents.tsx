@@ -1,8 +1,9 @@
-import { useEffect, useId, useRef, useState } from 'react'
-import { api, errorMessage } from '../lib/api'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { api, errorMessage, type AgentKeyInfo } from '../lib/api'
 import { useT } from '../lib/i18n'
 import { posthog } from '../lib/posthog'
 import { DEFAULT_ROLE_ID } from '../../shared/agents'
+import { AVATAR_ACCEPT, MAX_AVATAR_BYTES } from '../../shared/avatar'
 import {
   CUSTOM_AGENT_COLORS,
   MAX_AGENT_BLURB,
@@ -26,6 +27,7 @@ import { Input } from './ui/input'
 import { Modal, ModalActions, ModalLede, ModalSpacer, ModalTitle } from './ui/modal'
 import { Note } from './ui/note'
 import { Pressable } from './ui/pressable'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { Textarea } from './ui/textarea'
 import { cn } from '../lib/utils'
@@ -94,11 +96,15 @@ export function CustomAgents({ workspaceId }: { workspaceId?: string }) {
     }
   }
 
-  function saved(agent: CustomAgent | BuiltInAgent) {
+  function saved(agent: CustomAgent | BuiltInAgent, keepOpen = false) {
     if ('enabled' in agent) replaceBuiltIn(agent)
-    else if (editing?.kind === 'new') setAgents((list) => [...(list ?? []), agent])
-    else setAgents((list) => list?.map((a) => (a.id === agent.id ? agent : a)) ?? null)
-    setEditing(null)
+    else if (editing?.kind === 'new') {
+      setAgents((list) => {
+        const cur = list ?? []
+        return cur.some((a) => a.id === agent.id) ? cur.map((a) => (a.id === agent.id ? agent : a)) : [...cur, agent]
+      })
+    } else setAgents((list) => list?.map((a) => (a.id === agent.id ? agent : a)) ?? null)
+    if (!keepOpen) setEditing(null)
   }
 
   const full = (agents?.length ?? 0) >= MAX_CUSTOM_AGENTS
@@ -179,6 +185,7 @@ export function CustomAgents({ workspaceId }: { workspaceId?: string }) {
         <AgentRow
           key={agent.id}
           agent={agent}
+          badge={agent.external ? <Badge tone="outline">{t('agents.externalBadge')}</Badge> : null}
           actions={
             <>
               <Button size="sm" variant="bare" onClick={() => setEditing({ kind: 'custom', agent })}>
@@ -259,11 +266,13 @@ function AgentForm({
   editing: Editing
   workspaceId?: string
   onClose: () => void
-  onSaved: (agent: CustomAgent | BuiltInAgent) => void
+  onSaved: (agent: CustomAgent | BuiltInAgent, keepOpen?: boolean) => void
 }) {
   const t = useT()
   const ids = useId()
   const agent = editing.kind === 'new' ? undefined : editing.agent
+  const existingCustom = editing.kind === 'custom' ? editing.agent : undefined
+  const [external, setExternal] = useState(existingCustom?.external === true)
   const [name, setName] = useState(agent?.name ?? '')
   /* the handle follows the name until someone types one of their own */
   const [handle, setHandle] = useState(agent?.id ?? '')
@@ -271,6 +280,20 @@ function AgentForm({
   const [color, setColor] = useState<string>(agent?.color ?? CUSTOM_AGENT_COLORS[2])
   const [blurb, setBlurb] = useState(agent?.blurb ?? '')
   const [brief, setBrief] = useState(agent?.brief ?? '')
+  const [avatar, setAvatar] = useState<string | null>(existingCustom?.avatar ?? null)
+  const [pendingAvatar, setPendingAvatar] = useState<File | null>(null)
+  const avatarPreviewUrl = useMemo(() => (pendingAvatar ? URL.createObjectURL(pendingAvatar) : null), [pendingAvatar])
+  const [uploadingAvatar, setUploadingAvatar] = useState(false)
+  const [webhookUrl, setWebhookUrl] = useState(existingCustom?.webhookUrl ?? '')
+  const [webhookSecretInput, setWebhookSecretInput] = useState('')
+  const [agentKeyId, setAgentKeyId] = useState(existingCustom?.agentKeyId ?? '')
+  const [agentKeys, setAgentKeys] = useState<AgentKeyInfo[]>([])
+  const [revealedSecret, setRevealedSecret] = useState<string | null>(null)
+  const [copiedSecret, setCopiedSecret] = useState(false)
+  const [rotatingSecret, setRotatingSecret] = useState(false)
+  const [testingWebhook, setTestingWebhook] = useState(false)
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
+  const avatarInputRef = useRef<HTMLInputElement>(null)
   const briefRef = useRef<HTMLTextAreaElement>(null)
   /* no "New skill" row, since leaving for the skills card would lose this half-edited form */
   const skillMenu = useSkillMenu({
@@ -284,11 +307,115 @@ function AgentForm({
   const [error, setError] = useState('')
   const shownHandle = handleTouched ? handle : handleFor(name)
 
-  async function run(work: () => Promise<CustomAgent | BuiltInAgent>) {
+  useEffect(() => {
+    if (!external) return
+    let live = true
+    api.listAgentKeys().then(
+      (keys) => {
+        if (live) setAgentKeys(keys)
+      },
+      () => {},
+    )
+    return () => {
+      live = false
+    }
+  }, [external])
+
+  useEffect(() => {
+    if (!avatarPreviewUrl) return
+    return () => URL.revokeObjectURL(avatarPreviewUrl)
+  }, [avatarPreviewUrl])
+
+  async function onPickAvatar(file: File | undefined) {
+    if (!file) return
+    if (file.size > MAX_AVATAR_BYTES) {
+      setError('the photo is over 2 MB')
+      return
+    }
+    setError('')
+    if (editing.kind === 'custom') {
+      setUploadingAvatar(true)
+      try {
+        const updated = await api.uploadAgentAvatar(editing.agent.id, file, workspaceId)
+        setAvatar(updated.avatar ?? null)
+        onSaved(updated, true)
+      } catch (e) {
+        setError(errorMessage(e, t('agents.saveFailed')))
+      } finally {
+        setUploadingAvatar(false)
+      }
+    } else {
+      setPendingAvatar(file)
+    }
+  }
+
+  async function onRemoveAvatar() {
+    setError('')
+    if (editing.kind === 'custom' && avatar) {
+      setUploadingAvatar(true)
+      try {
+        const updated = await api.removeAgentAvatar(editing.agent.id, workspaceId)
+        setAvatar(null)
+        onSaved(updated, true)
+      } catch (e) {
+        setError(errorMessage(e, t('agents.saveFailed')))
+      } finally {
+        setUploadingAvatar(false)
+      }
+    } else {
+      setPendingAvatar(null)
+      setAvatar(null)
+    }
+  }
+
+  async function onRotateSecret() {
+    if (editing.kind !== 'custom') return
+    setRotatingSecret(true)
+    setError('')
+    try {
+      const res = await api.rotateAgentWebhookSecret(editing.agent.id, workspaceId)
+      setRevealedSecret(res.webhookSecret)
+      setCopiedSecret(false)
+      onSaved(res.agent, true)
+    } catch (e) {
+      setError(errorMessage(e, t('agents.saveFailed')))
+    } finally {
+      setRotatingSecret(false)
+    }
+  }
+
+  async function onTestWebhook() {
+    if (editing.kind !== 'custom') return
+    setTestingWebhook(true)
+    setTestResult(null)
+    setError('')
+    try {
+      const res = await api.testAgentWebhook(editing.agent.id, workspaceId)
+      setTestResult(
+        res.ok
+          ? { ok: true, text: t('agents.testWebhookOk', { status: res.status ?? 200 }) }
+          : { ok: false, text: t('agents.testWebhookFail', { error: res.error ?? `HTTP ${res.status ?? 0}` }) },
+      )
+    } catch (e) {
+      setTestResult({ ok: false, text: t('agents.testWebhookFail', { error: errorMessage(e, 'failed') }) })
+    } finally {
+      setTestingWebhook(false)
+    }
+  }
+
+  async function run(work: () => Promise<{ agent: CustomAgent | BuiltInAgent; secret?: string }>) {
     setSaving(true)
     setError('')
     try {
-      onSaved(await work())
+      const result = await work()
+      if (result.secret) {
+        setRevealedSecret(result.secret)
+        setCopiedSecret(false)
+        setSaving(false)
+        onSaved(result.agent, true)
+      } else {
+        onSaved(result.agent)
+      }
     } catch (e) {
       setError(errorMessage(e, t('agents.saveFailed')))
       setSaving(false)
@@ -296,13 +423,48 @@ function AgentForm({
   }
 
   function save() {
-    const fields = { color, blurb, brief, reviewer }
+    const baseFields = { color, blurb, brief, reviewer }
     return run(async () => {
-      if (editing.kind === 'builtin') return api.updateBuiltInAgent(editing.agent.id, fields, workspaceId)
-      if (editing.kind === 'custom') return api.updateCustomAgent(editing.agent.id, fields, workspaceId)
-      const created = await api.createCustomAgent({ name, handle: shownHandle, ...fields }, workspaceId)
-      posthog.capture('custom_agent_created_ui', { workspace: !!workspaceId, reviewer })
-      return created
+      if (editing.kind === 'builtin') {
+        return { agent: await api.updateBuiltInAgent(editing.agent.id, baseFields, workspaceId) }
+      }
+      if (editing.kind === 'custom') {
+        const patch = external
+          ? {
+              ...baseFields,
+              webhookUrl: webhookUrl.trim(),
+              agentKeyId: agentKeyId || null,
+              ...(webhookSecretInput.trim() ? { webhookSecret: webhookSecretInput.trim() } : {}),
+            }
+          : baseFields
+        return { agent: await api.updateCustomAgent(editing.agent.id, patch, workspaceId) }
+      }
+      const created = await api.createCustomAgent(
+        {
+          name,
+          handle: shownHandle,
+          ...baseFields,
+          ...(external
+            ? {
+                external: true,
+                webhookUrl: webhookUrl.trim(),
+                agentKeyId: agentKeyId || null,
+                ...(webhookSecretInput.trim() ? { webhookSecret: webhookSecretInput.trim() } : {}),
+              }
+            : {}),
+        },
+        workspaceId,
+      )
+      let finalAgent = created
+      if (pendingAvatar) {
+        try {
+          finalAgent = await api.uploadAgentAvatar(created.id, pendingAvatar, workspaceId)
+        } catch {
+          /* avatar upload failure shouldn't hide the newly created agent or its secret */
+        }
+      }
+      posthog.capture('custom_agent_created_ui', { workspace: !!workspaceId, reviewer, external })
+      return { agent: finalAgent, secret: created.webhookSecret }
     })
   }
 
@@ -317,133 +479,336 @@ function AgentForm({
     >
       <ModalTitle>{agent ? t('agents.editTitle', { name: agent.name }) : t('agents.addTitle')}</ModalTitle>
       <ModalLede>{editing.kind === 'builtin' ? t('agents.builtInLede') : t('agents.formLede')}</ModalLede>
-      <form
-        className="mt-4 flex flex-col gap-3.5"
-        onSubmit={(e) => {
-          e.preventDefault()
-          void save()
-        }}
-      >
-        <div className="grid gap-3.5 sm:grid-cols-2">
-          <Field
-            label={t('agents.name')}
-            labelVariant="form"
-            htmlFor={`${ids}-name`}
-            hint={agent ? t('agents.fixedHint') : undefined}
-          >
-            <Input
-              id={`${ids}-name`}
-              variant="well"
-              value={name}
-              maxLength={MAX_AGENT_NAME}
-              disabled={!!agent}
-              placeholder={t('agents.namePlaceholder')}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus={!agent}
-            />
-          </Field>
-          <Field label={t('agents.handle')} labelVariant="form" htmlFor={`${ids}-handle`}>
-            <Input
-              id={`${ids}-handle`}
-              variant="well"
-              className="font-mono"
-              value={shownHandle ? `@${shownHandle}` : ''}
-              disabled={!!agent}
-              placeholder="@seo"
-              onChange={(e) => {
-                setHandleTouched(true)
-                setHandle(
-                  e.target.value
-                    .replace(/^@+/, '')
-                    .toLowerCase()
-                    .replace(/[^a-z0-9]/g, ''),
-                )
+      {revealedSecret && editing.kind === 'new' ? (
+        <div className="mt-4 flex flex-col gap-3">
+          <Note>{t('agents.webhookSecretSaved')}</Note>
+          <div className="flex items-center gap-2 rounded-control border border-line bg-well px-3 py-2">
+            <code className="min-w-0 flex-1 break-all font-mono text-caption text-ink">{revealedSecret}</code>
+            <Button
+              type="button"
+              size="sm"
+              variant="bare"
+              onClick={() => {
+                void navigator.clipboard.writeText(revealedSecret).then(() => setCopiedSecret(true))
               }}
+            >
+              {copiedSecret ? t('agents.copied') : t('agents.copy')}
+            </Button>
+          </div>
+          <ModalActions className="mt-2">
+            <Button type="button" variant="primary" onClick={onClose}>
+              {t('agents.done')}
+            </Button>
+          </ModalActions>
+        </div>
+      ) : (
+        <form
+          className="mt-4 flex flex-col gap-3.5"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void save()
+          }}
+        >
+          {editing.kind === 'new' && (
+            <Field label={t('agents.modeLabel')} labelVariant="form">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Pressable
+                  type="button"
+                  className={cn(
+                    'flex flex-col items-start gap-0.5 rounded-control border p-2.5 text-left transition-colors',
+                    !external ? 'border-brand bg-brand/5' : 'border-line bg-surface hover:bg-sub',
+                  )}
+                  onClick={() => setExternal(false)}
+                >
+                  <span className="text-body font-medium text-ink">{t('agents.modeResident')}</span>
+                  <span className="text-caption text-ink-faint">{t('agents.modeResidentHint')}</span>
+                </Pressable>
+                <Pressable
+                  type="button"
+                  className={cn(
+                    'flex flex-col items-start gap-0.5 rounded-control border p-2.5 text-left transition-colors',
+                    external ? 'border-brand bg-brand/5' : 'border-line bg-surface hover:bg-sub',
+                  )}
+                  onClick={() => setExternal(true)}
+                >
+                  <span className="text-body font-medium text-ink">{t('agents.modeExternal')}</span>
+                  <span className="text-caption text-ink-faint">{t('agents.modeExternalHint')}</span>
+                </Pressable>
+              </div>
+            </Field>
+          )}
+          <div className="grid gap-3.5 sm:grid-cols-2">
+            <Field
+              label={t('agents.name')}
+              labelVariant="form"
+              htmlFor={`${ids}-name`}
+              hint={agent ? t('agents.fixedHint') : undefined}
+            >
+              <Input
+                id={`${ids}-name`}
+                variant="well"
+                value={name}
+                maxLength={MAX_AGENT_NAME}
+                disabled={!!agent}
+                placeholder={external ? 'Claude' : t('agents.namePlaceholder')}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus={!agent}
+              />
+            </Field>
+            <Field label={t('agents.handle')} labelVariant="form" htmlFor={`${ids}-handle`}>
+              <Input
+                id={`${ids}-handle`}
+                variant="well"
+                className="font-mono"
+                value={shownHandle ? `@${shownHandle}` : ''}
+                disabled={!!agent}
+                placeholder={external ? '@claude' : '@seo'}
+                onChange={(e) => {
+                  setHandleTouched(true)
+                  setHandle(
+                    e.target.value
+                      .replace(/^@+/, '')
+                      .toLowerCase()
+                      .replace(/[^a-z0-9]/g, ''),
+                  )
+                }}
+              />
+            </Field>
+          </div>
+          <Field label={t('agents.blurb')} labelVariant="form" htmlFor={`${ids}-blurb`}>
+            <Input
+              id={`${ids}-blurb`}
+              variant="well"
+              value={blurb}
+              maxLength={MAX_AGENT_BLURB}
+              placeholder={t('agents.blurbPlaceholder')}
+              onChange={(e) => setBlurb(e.target.value)}
             />
           </Field>
-        </div>
-        <Field label={t('agents.blurb')} labelVariant="form" htmlFor={`${ids}-blurb`}>
-          <Input
-            id={`${ids}-blurb`}
-            variant="well"
-            value={blurb}
-            maxLength={MAX_AGENT_BLURB}
-            placeholder={t('agents.blurbPlaceholder')}
-            onChange={(e) => setBlurb(e.target.value)}
-          />
-        </Field>
-        <Field
-          label={t('agents.brief')}
-          labelVariant="form"
-          htmlFor={`${ids}-brief`}
-          hint={t('agents.briefHint', { used: brief.length, max: MAX_AGENT_BRIEF })}
-        >
-          <div className="relative">
-            {skillMenu.menu}
-            <Textarea
-              ref={briefRef}
-              id={`${ids}-brief`}
-              variant="well"
-              className="min-h-[150px]"
-              value={brief}
-              maxLength={MAX_AGENT_BRIEF}
-              placeholder={t('agents.briefPlaceholder')}
-              {...skillMenu.inputProps}
-              onKeyDown={skillMenu.onKeyDown}
-            />
-          </div>
-        </Field>
-        <Field label={t('agents.color')} labelVariant="form">
-          <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={t('agents.color')}>
-            {[...new Set([...(agent ? [agent.color.toUpperCase()] : []), ...CUSTOM_AGENT_COLORS])].map((swatch) => (
-              <Pressable
-                key={swatch}
-                layout="inline"
-                focus="ring"
-                role="radio"
-                aria-checked={color.toUpperCase() === swatch.toUpperCase()}
-                aria-label={swatch}
-                className={cn(
-                  'rounded-full p-0.5',
-                  color.toUpperCase() === swatch.toUpperCase() && 'shadow-[0_0_0_2px_var(--ink)]',
+          {editing.kind !== 'builtin' && (
+            <Field label={t('agents.avatar')} labelVariant="form" hint={t('agents.avatarHint')}>
+              <div className="flex items-center gap-3">
+                {avatarPreviewUrl ? (
+                  <img src={avatarPreviewUrl} alt="" className="size-9 rounded-full object-cover" />
+                ) : (
+                  <RoleMark role={{ color, avatar }} size={36} />
                 )}
-                onClick={() => setColor(swatch)}
-              >
-                <RoleMark role={{ color: swatch }} size={22} />
-              </Pressable>
-            ))}
-          </div>
-        </Field>
-        <label className="flex items-start gap-3" htmlFor={`${ids}-reviewer`}>
-          <Switch id={`${ids}-reviewer`} checked={reviewer} onCheckedChange={setReviewer} className="mt-0.5" />
-          <span className="flex flex-col">
-            <span className="text-body font-medium text-ink">{t('agents.reviewer')}</span>
-            <span className="text-caption text-ink-faint">{t('agents.reviewerHint')}</span>
-          </span>
-        </label>
-        {error && <Note tone="error">{error}</Note>}
-        <ModalActions className="mt-2">
-          {editing.kind === 'builtin' && editing.agent.edited && (
+                <Input
+                  ref={avatarInputRef}
+                  type="file"
+                  accept={AVATAR_ACCEPT}
+                  aria-label={t('agents.avatarUpload')}
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    e.target.value = ''
+                    void onPickAvatar(file)
+                  }}
+                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="bare"
+                  disabled={uploadingAvatar}
+                  onClick={() => avatarInputRef.current?.click()}
+                >
+                  {t('agents.avatarUpload')}
+                </Button>
+                {(avatar || pendingAvatar) && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="bare"
+                    disabled={uploadingAvatar}
+                    onClick={() => void onRemoveAvatar()}
+                  >
+                    {t('agents.avatarRemove')}
+                  </Button>
+                )}
+              </div>
+            </Field>
+          )}
+          {external && (
             <>
-              <Button
-                type="button"
-                variant="bare"
-                disabled={saving}
-                onClick={() => void run(() => api.resetBuiltInAgent(editing.agent.id, workspaceId))}
+              <Field
+                label={t('agents.webhookUrl')}
+                labelVariant="form"
+                htmlFor={`${ids}-webhook`}
+                hint={t('agents.webhookUrlHint')}
               >
-                {t('agents.reset')}
-              </Button>
-              <ModalSpacer />
+                <Input
+                  id={`${ids}-webhook`}
+                  variant="well"
+                  type="url"
+                  value={webhookUrl}
+                  placeholder={t('agents.webhookUrlPlaceholder')}
+                  onChange={(e) => setWebhookUrl(e.target.value)}
+                />
+              </Field>
+              <Field
+                label={t('agents.agentKey')}
+                labelVariant="form"
+                htmlFor={`${ids}-agent-key`}
+                hint={t('agents.agentKeyHint')}
+              >
+                <Select
+                  value={agentKeyId || '__none__'}
+                  onValueChange={(value) => setAgentKeyId(value === '__none__' ? '' : value)}
+                >
+                  <SelectTrigger id={`${ids}-agent-key`} size="sm" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">{t('agents.agentKeyNone')}</SelectItem>
+                    {agentKeys.map((k) => (
+                      <SelectItem key={k.id} value={k.id}>
+                        {k.name} ({k.start}…)
+                      </SelectItem>
+                    ))}
+                    {agentKeyId && !agentKeys.some((k) => k.id === agentKeyId) && (
+                      <SelectItem value={agentKeyId}>{agentKeyId}</SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field
+                label={t('agents.webhookSecret')}
+                labelVariant="form"
+                htmlFor={`${ids}-secret`}
+                hint={t('agents.webhookSecretHint')}
+              >
+                {editing.kind === 'custom' ? (
+                  <div className="flex flex-col gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-caption text-ink-soft">{t('agents.webhookSecretConfigured')}</span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="bare"
+                        disabled={rotatingSecret}
+                        onClick={() => void onRotateSecret()}
+                      >
+                        {rotatingSecret ? t('agents.rotatingSecret') : t('agents.rotateSecret')}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="bare"
+                        disabled={testingWebhook}
+                        onClick={() => void onTestWebhook()}
+                      >
+                        {testingWebhook ? t('agents.testingWebhook') : t('agents.testWebhook')}
+                      </Button>
+                    </div>
+                    {revealedSecret && (
+                      <div className="flex items-center gap-2 rounded-control border border-line bg-well px-3 py-2">
+                        <code className="min-w-0 flex-1 break-all font-mono text-caption text-ink">
+                          {revealedSecret}
+                        </code>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="bare"
+                          onClick={() => {
+                            void navigator.clipboard.writeText(revealedSecret).then(() => setCopiedSecret(true))
+                          }}
+                        >
+                          {copiedSecret ? t('agents.copied') : t('agents.copy')}
+                        </Button>
+                      </div>
+                    )}
+                    {testResult && <Note tone={testResult.ok ? undefined : 'error'}>{testResult.text}</Note>}
+                  </div>
+                ) : (
+                  <Input
+                    id={`${ids}-secret`}
+                    variant="well"
+                    className="font-mono"
+                    value={webhookSecretInput}
+                    placeholder={t('agents.webhookSecretPlaceholder')}
+                    onChange={(e) => setWebhookSecretInput(e.target.value)}
+                  />
+                )}
+              </Field>
             </>
           )}
-          <Button type="button" variant="bare" onClick={onClose}>
-            {t('common.cancel')}
-          </Button>
-          <Button type="submit" variant="primary" disabled={saving}>
-            {saving ? t('agents.saving') : agent ? t('agents.save') : t('agents.create')}
-          </Button>
-        </ModalActions>
-      </form>
+          <Field
+            label={external ? t('agents.briefOptional') : t('agents.brief')}
+            labelVariant="form"
+            htmlFor={`${ids}-brief`}
+            hint={t('agents.briefHint', { used: brief.length, max: MAX_AGENT_BRIEF })}
+          >
+            <div className="relative">
+              {skillMenu.menu}
+              <Textarea
+                ref={briefRef}
+                id={`${ids}-brief`}
+                variant="well"
+                className={external ? 'min-h-[84px]' : 'min-h-[150px]'}
+                value={brief}
+                maxLength={MAX_AGENT_BRIEF}
+                placeholder={t('agents.briefPlaceholder')}
+                {...skillMenu.inputProps}
+                onKeyDown={skillMenu.onKeyDown}
+              />
+            </div>
+          </Field>
+          <Field label={t('agents.color')} labelVariant="form">
+            <div className="flex flex-wrap gap-2" role="radiogroup" aria-label={t('agents.color')}>
+              {[...new Set([...(agent ? [agent.color.toUpperCase()] : []), ...CUSTOM_AGENT_COLORS])].map((swatch) => (
+                <Pressable
+                  key={swatch}
+                  layout="inline"
+                  focus="ring"
+                  role="radio"
+                  aria-checked={color.toUpperCase() === swatch.toUpperCase()}
+                  aria-label={swatch}
+                  className={cn(
+                    'rounded-full p-0.5',
+                    color.toUpperCase() === swatch.toUpperCase() && 'shadow-[0_0_0_2px_var(--ink)]',
+                  )}
+                  onClick={() => setColor(swatch)}
+                >
+                  <RoleMark role={{ color: swatch }} size={22} />
+                </Pressable>
+              ))}
+            </div>
+          </Field>
+          {!external && (
+            <label className="flex items-start gap-3" htmlFor={`${ids}-reviewer`}>
+              <Switch id={`${ids}-reviewer`} checked={reviewer} onCheckedChange={setReviewer} className="mt-0.5" />
+              <span className="flex flex-col">
+                <span className="text-body font-medium text-ink">{t('agents.reviewer')}</span>
+                <span className="text-caption text-ink-faint">{t('agents.reviewerHint')}</span>
+              </span>
+            </label>
+          )}
+          {error && <Note tone="error">{error}</Note>}
+          <ModalActions className="mt-2">
+            {editing.kind === 'builtin' && editing.agent.edited && (
+              <>
+                <Button
+                  type="button"
+                  variant="bare"
+                  disabled={saving}
+                  onClick={() =>
+                    void run(async () => ({ agent: await api.resetBuiltInAgent(editing.agent.id, workspaceId) }))
+                  }
+                >
+                  {t('agents.reset')}
+                </Button>
+                <ModalSpacer />
+              </>
+            )}
+            <Button type="button" variant="bare" onClick={onClose}>
+              {t('common.cancel')}
+            </Button>
+            <Button type="submit" variant="primary" disabled={saving}>
+              {saving ? t('agents.saving') : agent ? t('agents.save') : t('agents.create')}
+            </Button>
+          </ModalActions>
+        </form>
+      )}
     </Modal>
   )
 }

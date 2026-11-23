@@ -2,7 +2,7 @@ import { useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNod
 import { createPortal } from 'react-dom'
 import type { ElementComment } from '../../shared/types'
 import { colorFor } from '../../shared/types'
-import { DEFAULT_ROLE_NAME } from '../../shared/agents'
+import { DEFAULT_ROLE_NAME, roleByAgentName } from '../../shared/agents'
 import { useRoster } from '../hooks/use-roster'
 import { cn } from '@/lib/utils'
 import { canCommentOpenCanvas, canEditOpenCanvas, useStore } from '../lib/store'
@@ -59,7 +59,8 @@ export function CommentPin({
 }) {
   const [root] = thread
   const agentItem = [...thread].reverse().find((x) => x.forAgent && !x.resolvedAt)
-  const working = agentItem?.claimedBy && !agentItem.failedAt
+  const failed = !!(agentItem?.failedAt || agentItem?.deliveryStatus === 'failed')
+  const working = !failed && (!!agentItem?.claimedBy || agentItem?.deliveryStatus === 'pending')
   const movable = useStore(canCommentOpenCanvas)
   const dragged = useStore((s) => s.commentDrag?.id === root.id)
   /* the click after a drag's release must not toggle the thread */
@@ -189,7 +190,7 @@ export function CommentPin({
             'pointer-events-auto absolute z-[4] grid h-[26px] w-[26px] cursor-pointer place-items-center rounded-[50%_50%_50%_4px] border-2 border-white text-[13px] text-white animate-[chip-in_0.25s_ease]',
             PIN_SCALE,
             dragged && 'opacity-0',
-            agentItem?.failedAt
+            failed
               ? 'bg-accent-ink! font-extrabold shadow-[0_0_0_3px_rgba(208,52,31,0.2),var(--shadow-card)]'
               : 'shadow-card',
             working &&
@@ -210,7 +211,7 @@ export function CommentPin({
           }}
           title={`${root.from}: ${root.text}${thread.length > 1 ? t('stage.pinReplies', { count: thread.length - 1 }) : ''}`}
         >
-          {agentItem?.failedAt ? '!' : working ? <SparkIcon size={14} /> : <CommentIcon size={14} />}
+          {failed ? '!' : working ? <SparkIcon size={14} /> : <CommentIcon size={14} />}
           {showThread &&
             (threadLayer
               ? createPortal(
@@ -324,29 +325,63 @@ export function CommentComposer({
 }
 
 /** Where an @agent request in the thread stands, or null for a human note. */
-function agentStatus(c: ElementComment, t: Translate): ReactNode {
+function agentStatus(c: ElementComment, t: Translate): { node: ReactNode; tone: 'brand' | 'error' } | null {
   const target = c.targetAgent ?? DEFAULT_ROLE_NAME
-  if (c.failedAt) return t('stage.agentStopped', { name: target })
+  if (c.deliveryStatus === 'failed') return { node: t('stage.deliveryFailed'), tone: 'error' }
+  if (c.failedAt) return { node: t('stage.agentStopped', { name: target }), tone: 'error' }
   if (c.resolvedAt)
-    return c.forAgent ? (
-      <>
-        <CheckIcon size={12} />
-        {c.resolvedBy ?? target}
-      </>
-    ) : null
+    return c.forAgent
+      ? {
+          node: (
+            <>
+              <CheckIcon size={12} />
+              {c.resolvedBy ?? target}
+            </>
+          ),
+          tone: 'brand',
+        }
+      : null
   if (c.claimedBy)
-    return (
-      <>
-        <SparkIcon size={12} />
-        {t('stage.isOnIt', { name: c.claimedBy })}
-      </>
-    )
-  return c.forAgent ? (
-    <>
-      <SparkIcon size={12} />
-      {t('stage.waitingFor', { name: target })}
-    </>
-  ) : null
+    return {
+      node: (
+        <>
+          <SparkIcon size={12} />
+          {t('stage.isOnIt', { name: c.claimedBy })}
+        </>
+      ),
+      tone: 'brand',
+    }
+  if (c.deliveryStatus === 'delivered')
+    return {
+      node: (
+        <>
+          <CheckIcon size={12} />
+          {t('stage.deliveredTo', { name: target })}
+        </>
+      ),
+      tone: 'brand',
+    }
+  if (c.deliveryStatus === 'pending')
+    return {
+      node: (
+        <>
+          <SparkIcon size={12} />
+          {t('stage.deliveringTo', { name: target })}
+        </>
+      ),
+      tone: 'brand',
+    }
+  return c.forAgent
+    ? {
+        node: (
+          <>
+            <SparkIcon size={12} />
+            {t('stage.waitingFor', { name: target })}
+          </>
+        ),
+        tone: 'brand',
+      }
+    : null
 }
 
 export function CommentThread({
@@ -364,6 +399,7 @@ export function CommentThread({
   onRetry: (commentId: string) => void
 }) {
   const t = useT()
+  const roster = useRoster()
   const [reply, setReply] = useState('')
   const [sending, setSending] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -401,14 +437,25 @@ export function CommentThread({
       <div ref={listRef} className="-mx-1 max-h-[240px] overflow-y-auto px-1">
         {thread.map((c, i) => {
           const status = agentStatus(c, t)
+          const authorRole = roleByAgentName(c.from, roster)
           return (
             <div key={c.id} className={cn(i > 0 && 'mt-2 border-t border-line-soft pt-2')}>
               <div className="flex items-center justify-between gap-2 text-[12px]">
-                <b style={{ color: colorFor(c.from) }}>{c.from}</b>
+                <span className="flex min-w-0 items-center gap-1.5">
+                  {authorRole && <RoleMark role={authorRole} size={15} />}
+                  <b className="truncate" style={{ color: authorRole?.color ?? colorFor(c.from) }}>
+                    {c.from}
+                  </b>
+                </span>
                 <span className="flex min-w-0 items-center gap-1">
                   {status && (
-                    <span className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] font-semibold text-brand">
-                      {status}
+                    <span
+                      className={cn(
+                        'inline-flex items-center gap-1 whitespace-nowrap text-[11px] font-semibold',
+                        status.tone === 'error' ? 'text-accent-ink' : 'text-brand',
+                      )}
+                    >
+                      {status.node}
                     </span>
                   )}
                   {i === 0 && (
@@ -427,7 +474,7 @@ export function CommentThread({
               <div className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-[1.45] text-ink">
                 <MentionText text={c.text} />
               </div>
-              {c.failedAt ? (
+              {c.failedAt || c.deliveryStatus === 'failed' ? (
                 <div className="mt-1 flex items-center gap-2 text-[11px] leading-[1.4] text-accent-ink">
                   <span>{c.failureReason ?? t('stage.agentDidNotFinish')}</span>
                   {canEdit && (

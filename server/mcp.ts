@@ -18,7 +18,8 @@ import { z } from 'zod'
 import { store } from './store.ts'
 import { addPage, savePages, updateFrameMeta } from './pageTools.ts'
 import { fontsForCanvas } from './fonts.ts'
-import { customAgentsForCanvas } from './customAgents.ts'
+import { customAgentsForCanvas, findExternalAgentByKeyId, type ExternalAgentRecord } from './customAgents.ts'
+import { canvasLink, commentLink, frameLink } from './links.ts'
 import { describeLibrary, libraryBrief, MAX_FONT_BYTES } from '../shared/fonts.ts'
 import { addCanvasFont, uploadedFontResult } from './canvasFontUpload.ts'
 import { EMBEDDED_MIN_LENGTH, inlineDataRefusal } from './inlineData.ts'
@@ -87,7 +88,7 @@ import { createImportedWebpageFrame } from './webpageImport.ts'
 import { normalizeImportUrl } from './importer.ts'
 import { extensions, type McpToolHelpers } from './extensions.ts'
 import { websiteAccessErrorMessage } from './websiteAccess.ts'
-import { mentionedRole } from '../shared/agents.ts'
+import { mentionedRole, roleByAgentName, roleById } from '../shared/agents.ts'
 import { resolveCommentMentions, threadAuthorIds } from './canvasPeople.ts'
 import * as allowance from './allowance.ts'
 import { embedsPreview, previewOf, previewToolMeta, registerFramePreview, type CanvasPreview } from './chatgptApp.ts'
@@ -405,8 +406,24 @@ function frameSummary(
  *  (handleMcpRequest builds one server per stateless request, so it is the
  *  name remembered from initialize, else the OAuth application's): feedback
  *  records it and agent presence reads its brand from it. */
-export function buildMcpServer(owner?: string, ownerId?: string, clientName?: string): McpServer {
+export function buildMcpServer(
+  owner?: string,
+  ownerId?: string,
+  clientName?: string,
+  boundExternalAgent?: ExternalAgentRecord,
+): McpServer {
   const actorFrom = (agent_name?: string) => {
+    if (boundExternalAgent) {
+      return {
+        name: boundExternalAgent.name,
+        kind: 'agent' as const,
+        color: boundExternalAgent.color,
+        owner,
+        brand: resolveAgentBrand(clientName, boundExternalAgent.name),
+        agentKey: `ext:${boundExternalAgent.id}`,
+        ...(boundExternalAgent.avatar ? { image: boundExternalAgent.avatar } : {}),
+      }
+    }
     const actor = actions.resolveActor({
       name: agent_name,
       kind: 'agent',
@@ -493,7 +510,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
      connected" confirmation in the UI) must appear on an agent's FIRST
      canvas-scoped call, not only once it mutates something. */
   const arrive = (canvasId: string, agent_name?: string) => {
-    if (agent_name) actions.heartbeatAgent(canvasId, actorFrom(agent_name))
+    if (boundExternalAgent || agent_name) actions.heartbeatAgent(canvasId, actorFrom(agent_name))
   }
   const server = new McpServer({ name: 'doop-canvas', version: packageJson.version }, { instructions: INSTRUCTIONS })
   loadToolTargets(server)
@@ -1601,6 +1618,8 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
                     mention: `@${a.id}`,
                     blurb: a.blurb,
                     ...(a.reviewer ? { reviewer: true } : {}),
+                    ...(a.external ? { external: true } : {}),
+                    ...(a.avatar ? { avatar: a.avatar } : {}),
                   })),
                 }
               : {}),
@@ -2041,7 +2060,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
         canvas_id: z.string(),
         comment_id: z.string().describe('The root comment or any reply in the thread (from get_comments)'),
         text: z.string().describe('The reply text. Trimmed; empty replies are rejected.'),
-        agent_name: agentName,
+        agent_name: agentName.optional(),
       },
     },
     async ({ canvas_id, comment_id, text: body, agent_name }) => {
@@ -2052,7 +2071,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
       if (!body.trim() || !canvas || !actions.openThread(comment_id)) return err('thread resolved or empty text')
       /* people it tags are emailed; a person's name is never an agent's */
       const mentions = await resolveCommentMentions(canvas, body.trim(), { authorIds: threadAuthorIds(found) })
-      /* an @mention commands the resident agent to change frames — the REST
+      /* an @mention commands the agent to change frames — the REST
          reply route holds comment-only visitors to the same rule */
       const mentioned = mentionedRole(mentions.roleText, actions.canvasRoster(canvas_id))
       if (mentioned && !canvasFor(canvas_id, 'edit'))
@@ -2060,10 +2079,9 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
       const actor = actorFrom(agent_name)
       arrive(canvas_id, agent_name)
       /* A reply that @mentions a resident agent is a new command to the team,
-         metered like a card; plain replies stay free. Mirrors the REST reply
-         route so the meter is spent exactly once either way. */
+         metered like a card; plain replies and external webhook agents stay free. */
       let gate: Awaited<ReturnType<typeof allowance.consumeResidentTask>> | undefined
-      if (mentioned && ownerId) {
+      if (mentioned && !mentioned.external && ownerId) {
         gate = await allowance.consumeResidentTask(ownerId)
         if (!gate.ok)
           return err(
@@ -2088,6 +2106,229 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
   )
 
   server.registerTool(
+    'claim_comment',
+    {
+      title: 'Claim a comment as in progress',
+      description:
+        'Mark an open comment (or reply) as claimed/in-progress by this agent so humans on the canvas immediately see that you picked it up. External agents should call this after receiving a webhook push (or polling list_mentions) and before starting edits.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z.string(),
+        comment_id: z.string().describe('The comment or reply id to claim (from webhook payload or list_mentions)'),
+        agent_name: agentName.optional(),
+      },
+    },
+    async ({ canvas_id, comment_id, agent_name }) => {
+      if (!canvasFor(canvas_id, 'comment')) return noCanvas(canvas_id)
+      const found = actions.findComment(comment_id)
+      if (!found || found.canvasId !== canvas_id) return noComment(comment_id)
+      if (found.resolvedAt) return err('comment is already resolved')
+      const actor = actorFrom(agent_name)
+      arrive(canvas_id, agent_name)
+      const claimed = actions.claimExternalComment(comment_id, actor.name)
+      if (!claimed) return noComment(comment_id)
+      return text({
+        ok: true,
+        id: claimed.id,
+        claimedBy: claimed.claimedBy,
+        claimedAt: claimed.claimedAt ? new Date(claimed.claimedAt).toISOString() : undefined,
+      })
+    },
+  )
+
+  server.registerTool(
+    'list_mentions',
+    {
+      title: 'List unhandled mentions and assignments for an agent',
+      description:
+        'Polling fallback for external agents (e.g. when a webhook push failed or was unreachable). Returns unhandled @mentions, follow-up replies in threads the agent participated in, open assigned board cards, and open task feedback across accessible canvases (or one canvas_id). When authenticated with an Agent Key bound to an external agent, `agent` defaults to that agent.',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        agent: z
+          .string()
+          .optional()
+          .describe('Agent @handle or display name (optional when using a bound external-agent API key)'),
+        since: z
+          .union([z.number(), z.string()])
+          .optional()
+          .describe('Only return items at or after this timestamp (unix ms or ISO-8601 string)'),
+        canvas_id: z.string().optional().describe('Optional canvas id to filter to a single canvas'),
+        include_resolved: z
+          .boolean()
+          .optional()
+          .describe('Include resolved or already-replied mentions (default false)'),
+      },
+    },
+    async ({ agent, since, canvas_id, include_resolved }) => {
+      const sinceMs =
+        typeof since === 'number' && Number.isFinite(since)
+          ? since
+          : typeof since === 'string' && since.trim()
+            ? Number.isFinite(Number(since))
+              ? Number(since)
+              : Date.parse(since)
+            : 0
+      const cutoff = Number.isFinite(sinceMs) ? sinceMs : 0
+      const rawTarget = agent?.trim().replace(/^@+/, '') || boundExternalAgent?.handle || ''
+      if (!rawTarget) {
+        return err('pass `agent` (handle or name) or authenticate with an API key bound to an external agent')
+      }
+      const targetNeedle = rawTarget.toLowerCase()
+
+      const canvases = canvas_id
+        ? (() => {
+            const c = canvasFor(canvas_id, 'view')
+            return c ? [c] : null
+          })()
+        : ownerId
+          ? store
+              .listCanvases(ownerId, workspaces.workspaceIdsFor(ownerId))
+              .map((meta) => store.getCanvas(meta.id))
+              .filter((c): c is NonNullable<typeof c> => !!c && roleAllows(canvasRole(ownerId, c), 'view'))
+          : []
+      if (canvases === null) return noCanvas(canvas_id!)
+
+      const mentions: Record<string, unknown>[] = []
+      const cards: Record<string, unknown>[] = []
+      const feedback: Record<string, unknown>[] = []
+      let resolvedAgent: { handle: string; name: string } | undefined = boundExternalAgent
+        ? { handle: boundExternalAgent.handle, name: boundExternalAgent.name }
+        : undefined
+
+      for (const c of canvases) {
+        const roster = actions.canvasRoster(c.id)
+        const role =
+          roleById(targetNeedle, roster) ??
+          roleByAgentName(targetNeedle, roster) ??
+          (boundExternalAgent ? roleById(boundExternalAgent.handle, roster) : undefined)
+        const names = new Set<string>([targetNeedle])
+        if (role) {
+          names.add(role.id.toLowerCase())
+          names.add(role.name.toLowerCase())
+          if (!resolvedAgent) resolvedAgent = { handle: role.id, name: role.name }
+        } else if (boundExternalAgent) {
+          names.add(boundExternalAgent.handle.toLowerCase())
+          names.add(boundExternalAgent.name.toLowerCase())
+        }
+        const matchesAgent = (value: string | undefined): boolean =>
+          !!value && names.has(value.trim().replace(/^@+/, '').toLowerCase())
+
+        const allComments = actions.getComments(c.id)
+        const byRoot = new Map<string, typeof allComments>()
+        for (const item of allComments) {
+          const rootId = item.parentId ?? item.id
+          const arr = byRoot.get(rootId) ?? []
+          arr.push(item)
+          byRoot.set(rootId, arr)
+        }
+
+        for (const [rootId, threadItems] of byRoot) {
+          const ordered = [...threadItems].sort((a, b) => a.at - b.at)
+          const agentParticipated = ordered.some((m) => matchesAgent(m.targetAgent) || matchesAgent(m.from))
+          if (!agentParticipated) continue
+          const latestAgentReplyAt = ordered
+            .filter((m) => matchesAgent(m.from))
+            .reduce((max, m) => Math.max(max, m.at), 0)
+
+          for (const item of ordered) {
+            if (matchesAgent(item.from)) continue
+            if (item.at < cutoff) continue
+            const direct = matchesAgent(item.targetAgent)
+            const isFollowUp = !direct && !!item.parentId
+            if (!direct && !isFollowUp) continue
+            if (!include_resolved) {
+              if (item.resolvedAt) continue
+              if (latestAgentReplyAt > item.at) continue
+            }
+            const frame = item.frameId ? store.getFrame(item.frameId) : undefined
+            mentions.push({
+              event_type: item.parentId && !direct ? 'agent.thread_replied' : 'agent.comment_mentioned',
+              canvas_id: c.id,
+              canvas_name: c.name,
+              canvas_url: canvasLink(c.id),
+              frame_id: item.frameId ?? null,
+              frame_name: frame?.name ?? null,
+              frame_url: item.frameId ? frameLink(c.id, item.frameId) : null,
+              page_id: item.pageId ?? frame?.pageId ?? null,
+              comment_id: item.id,
+              thread_id: rootId,
+              elementId: item.elementId ?? null,
+              snippet: item.snippet,
+              text: item.text,
+              author: item.from,
+              at: item.at,
+              delivery_status: item.deliveryStatus ?? null,
+              delivered_at: item.deliveredAt ?? null,
+              claimed_by: item.claimedBy ?? null,
+              claimed_at: item.claimedAt ?? null,
+              failed_at: item.failedAt ?? null,
+              failure_reason: item.failureReason ?? null,
+              resolved_at: item.resolvedAt ?? null,
+              comment_url: commentLink(item),
+            })
+          }
+        }
+
+        for (const card of actions.getTasks(c.id)) {
+          if (!card.queuedBy || card.endedAt || card.failedAt || card.agentName) continue
+          if (card.startedAt < cutoff) continue
+          const pipeline = card.pipeline?.length ? card.pipeline : ['doop']
+          const stageId = pipeline[Math.min(card.stage ?? 0, pipeline.length - 1)]
+          const stageRole = roleById(stageId, roster)
+          if (!matchesAgent(stageId) && !matchesAgent(stageRole?.name)) continue
+          const frameId = card.scope?.frameId ?? null
+          const frame = frameId ? store.getFrame(frameId) : undefined
+          cards.push({
+            event_type: 'agent.card_assigned',
+            canvas_id: c.id,
+            canvas_name: c.name,
+            canvas_url: canvasLink(c.id),
+            frame_id: frameId,
+            frame_name: frame?.name ?? null,
+            frame_url: frameId ? frameLink(c.id, frameId) : null,
+            card_id: card.id,
+            text: card.status,
+            author: card.queuedBy,
+            at: card.startedAt,
+            pipeline,
+            stage: card.stage ?? 0,
+            scope: card.scope ?? null,
+          })
+        }
+
+        for (const fb of actions.getFeedback(c.id)) {
+          if (fb.at < cutoff) continue
+          if (!include_resolved && (fb.deliveredAt || fb.completedAt || fb.failedAt)) continue
+          if (!matchesAgent(fb.targetAgent) && !matchesAgent(fb.agentName)) continue
+          feedback.push({
+            event_type: 'agent.feedback_received',
+            canvas_id: c.id,
+            canvas_name: c.name,
+            canvas_url: canvasLink(c.id),
+            task_id: fb.taskId,
+            feedback_id: fb.id,
+            text: fb.text,
+            author: fb.from,
+            at: fb.at,
+          })
+        }
+      }
+
+      mentions.sort((a, b) => Number(a.at) - Number(b.at))
+      cards.sort((a, b) => Number(a.at) - Number(b.at))
+      feedback.sort((a, b) => Number(a.at) - Number(b.at))
+
+      return text({
+        agent: resolvedAgent ?? { handle: targetNeedle, name: rawTarget },
+        count: mentions.length + cards.length + feedback.length,
+        mentions,
+        cards,
+        feedback,
+      })
+    },
+  )
+
+  server.registerTool(
     'resolve_comment',
     {
       title: 'Resolve a comment',
@@ -2097,7 +2338,7 @@ export function buildMcpServer(owner?: string, ownerId?: string, clientName?: st
       inputSchema: {
         canvas_id: z.string(),
         comment_id: z.string().describe('The root comment or a reply (from get_comments)'),
-        agent_name: agentName,
+        agent_name: agentName.optional(),
       },
     },
     async ({ canvas_id, comment_id, agent_name }) => {
@@ -3615,7 +3856,7 @@ export async function handleMcpRequest(req: Request, res: Response) {
      sending a headless client into OAuth discovery helps nobody. Everything
      else falls through to the OAuth gate below. */
   const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? '')?.[1]
-  let session: { userId?: string | null; clientId?: string | null } | null
+  let session: { userId?: string | null; clientId?: string | null; keyId?: string } | null
   if (bearer && isAgentKeySecret(bearer)) {
     session = await verifyAgentKey(bearer)
     if (!session) {
@@ -3693,7 +3934,8 @@ export async function handleMcpRequest(req: Request, res: Response) {
   const clientName =
     (bearer ? clientNamesByCredential.get(credentialKey(bearer)) : undefined) ??
     (oauthClientId ? await oauthClientName(oauthClientId) : undefined)
-  const server = buildMcpServer(owner, session?.userId ?? undefined, clientName)
+  const boundExternalAgent = session?.keyId ? findExternalAgentByKeyId(session.keyId) : undefined
+  const server = buildMcpServer(owner, session?.userId ?? undefined, clientName, boundExternalAgent)
   /* Stateless, and plain JSON rather than an SSE stream per response: no
      tool here sends notifications mid-call, so a stream carries nothing a
      JSON body does not, and JSON is what every client — including ChatGPT's
