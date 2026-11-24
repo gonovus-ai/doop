@@ -28,6 +28,7 @@ import { posthog, setSupportWidgetVisible, syncReplayForUser, suspendAnalyticsWh
 import { useMe } from './lib/me'
 import { adminApi } from './lib/api'
 import { Button } from './components/ui/button'
+import { DotMatrix } from './components/ui/dot-matrix'
 import { AuthScreen } from './components/ui/screen'
 import { DesktopTabs, ShellDragBar } from './components/DesktopTabs'
 import { WindowControls } from './components/WindowControls'
@@ -54,6 +55,7 @@ function reportProviderSignup() {
 }
 
 export function App() {
+  const t = useT()
   const [route, setRoute] = useState(location.pathname + location.search)
   const path = route.split('?')[0]!
   const { data: session, isPending } = authClient.useSession()
@@ -138,7 +140,12 @@ export function App() {
     return (
       <>
         <ShellDragBar />
-        <AuthScreen />
+        <AuthScreen>
+          <div className="flex items-center gap-2.5 rounded-full bg-surface px-3.5 py-2 text-[12.5px] font-medium text-ink-soft shadow-pop">
+            <DotMatrix />
+            <span>{t('common.loading')}</span>
+          </div>
+        </AuthScreen>
       </>
     )
   /* the desktop app sent this browser here to begin a provider sign-in on

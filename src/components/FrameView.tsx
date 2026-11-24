@@ -55,6 +55,7 @@ import { FRAME_COMMENT_SELECTOR, isElementComment, isFrameComment, elementCommen
 import { elementIdSelector } from '../../shared/elementId'
 import { cn } from '@/lib/utils'
 import { Tooltip } from './ui/tooltip'
+import { DotMatrix } from './ui/dot-matrix'
 import { EditIcon, EyeClosedIcon, GithubIcon, LockIcon, SyncIcon } from './ui/icons'
 import { isSyncedFrame } from '../lib/sync'
 import { isGithubFrame, isGithubPlaceholder } from '../lib/github'
@@ -928,6 +929,10 @@ export const FrameView = memo(function FrameView({
      flipped or shifted it away from a viewport edge */
   const menuAt = useRef({ x: 0, y: 0 })
   const [runtimeReady, setRuntimeReady] = useState(false)
+  /* hides the iframe under a subtle loading skeleton on first mount until its
+     stylesheets, Tailwind/DS scripts, and React components finish painting —
+     eliminating the unstyled-HTML (FOUC) and blank-box flash on canvas load */
+  const [visualReady, setVisualReady] = useState(() => !frame.html || isCanvasElement(frame.html))
   /* the margin the iframe reaches past a standalone shape's box, so a stroke
      spills past it as in Figma (the runtime asks, see `bleed` there) */
   const [bleed, setBleed] = useState(0)
@@ -1035,6 +1040,9 @@ export const FrameView = memo(function FrameView({
         }
         setRuntimeReady(true)
       }
+      if (ev.data?.type === 'doop:frame-visual-ready' && win && ev.source === win) {
+        setVisualReady(true)
+      }
       if (ev.data?.type === 'doop:bleed-want' && win && ev.source === win) {
         const px = Number((ev.data as { px?: unknown }).px)
         setBleed(Number.isFinite(px) ? Math.min(1024, Math.max(0, px)) : 0)
@@ -1047,6 +1055,12 @@ export const FrameView = memo(function FrameView({
       runtimePort.current = null
     }
   }, [])
+  /* safety valve: never leave a frame hidden if a slow or broken external asset stalls */
+  useEffect(() => {
+    if (visualReady) return
+    const timer = window.setTimeout(() => setVisualReady(true), 3200)
+    return () => window.clearTimeout(timer)
+  }, [visualReady])
   /* the runtime insets its body by the margin once the iframe has grown by it */
   useLayoutEffect(() => {
     if (runtimeReady) iframeRef.current?.contentWindow?.postMessage({ type: 'doop:bleed', px: bleed }, '*')
@@ -2183,7 +2197,10 @@ export const FrameView = memo(function FrameView({
             >
               <iframe
                 ref={iframeRef}
-                className="relative block border-none bg-transparent"
+                className={cn(
+                  'relative block border-none bg-transparent transition-opacity duration-200 motion-reduce:transition-none',
+                  !visualReady && !!frame.html && !stream && !isCanvasElement(frame.html) ? 'opacity-0' : 'opacity-100',
+                )}
                 data-bleed={bleed || undefined}
                 title={frame.name}
                 data-doop-frame=""
@@ -2217,6 +2234,35 @@ export const FrameView = memo(function FrameView({
             </div>
             {/* a standalone element is see-through: the paper's grid shows */}
             {!isCanvasElement(frame.html) && <PixelGrid layoutZoom={layoutZoom} />}
+            {!visualReady && !!frame.html && !stream && !isCanvasElement(frame.html) && (
+              <div
+                data-frame-loading=""
+                aria-busy="true"
+                className="pointer-events-none absolute inset-0 overflow-hidden bg-surface"
+              >
+                <div className="flex h-full flex-col gap-[4%] p-[5%] animate-[skeleton-pulse_1.4s_ease-in-out_infinite] motion-reduce:animate-none">
+                  <div className="h-[7%] max-h-11 min-h-3 w-[38%] rounded-md bg-paper-deep" />
+                  <div className="grid flex-1 grid-cols-12 gap-[3%]">
+                    <div className="col-span-4 rounded-lg bg-paper-deep/75" />
+                    <div className="col-span-8 flex flex-col gap-[4%]">
+                      <div className="h-[34%] rounded-lg bg-paper-deep/85" />
+                      <div className="flex-1 rounded-lg bg-paper-deep/65" />
+                    </div>
+                  </div>
+                </div>
+                {frame.width >= 160 && frame.height >= 120 && (
+                  <div className="absolute inset-0 grid place-items-center">
+                    <div
+                      className="flex items-center gap-2 rounded-full bg-surface/95 px-3 py-1.5 text-[11.5px] font-medium text-ink-soft shadow-pop backdrop-blur-xs"
+                      style={{ transform: 'scale(calc(1 / var(--zoom, 1)))' }}
+                    >
+                      <DotMatrix />
+                      <span>{t('stage.loadingFrame')}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             {!frame.html && (
               <div className="absolute inset-0 grid place-items-center bg-[repeating-linear-gradient(45deg,transparent_0_10px,rgba(28,26,21,0.025)_10px_20px)] text-[13px] text-ink-faint">
                 empty frame — add HTML

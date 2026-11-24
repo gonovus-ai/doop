@@ -14,6 +14,8 @@ export const stage = {
   hintShape: 'Drag to draw · Shift for a square · Esc to cancel',
   finishPath: 'Finish path',
   newFrame: 'New frame',
+  loadingCanvas: 'Loading canvas…',
+  loadingFrame: 'Loading…',
 
   /* drawing, path editing, moving and resizing */
   textInputLabel: 'Text to add to canvas',

@@ -41,6 +41,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } 
 import { Toolbar, ToolbarButton, ToolbarDivider, ToolbarHighlight } from './ui/toolbar'
 import { ZoomControls } from './ZoomControls'
 import { Tooltip } from './ui/tooltip'
+import { DotMatrix } from './ui/dot-matrix'
 import {
   BoxIcon,
   CircleIcon,
@@ -1296,6 +1297,18 @@ export function Stage({
                 badge covers it; CommentPin keeps it on its pin */}
             <div data-comment-ui className="pointer-events-none absolute inset-0" ref={setThreadLayer} />
             {showRulers && <Rulers stage={ref} />}
+            {!canvas && (
+              <div
+                data-stage-loading=""
+                aria-busy="true"
+                className="pointer-events-none absolute inset-0 z-20 grid place-items-center"
+              >
+                <div className="flex items-center gap-2.5 rounded-full bg-surface/95 px-3.5 py-2 text-[12.5px] font-medium text-ink-soft shadow-pop backdrop-blur-xs animate-[fade-in_150ms_ease-out] motion-reduce:animate-none">
+                  <DotMatrix />
+                  <span>{t('stage.loadingCanvas')}</span>
+                </div>
+              </div>
+            )}
           </div>
         </ContextMenuTrigger>
         <FollowFrame />

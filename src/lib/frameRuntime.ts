@@ -230,30 +230,110 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     for (var r = fromKids.length - 1; r >= tc.length; r--) from.removeChild(fromKids[r])
   }
 
-  /* cloned/imported script nodes never execute — swap in fresh ones */
+  /* cloned/imported script nodes never execute — swap in fresh ones and return
+     load promises for external src scripts so initial visual readiness can wait
+     for Tailwind CDN / React UMD / Design System bundles before revealing. */
   function activateScripts() {
     var scripts = document.querySelectorAll('script:not([data-v-ran]):not([data-v-boot])')
+    var pending = []
+    var hasTailwind = false
     for (var i = 0; i < scripts.length; i++) {
       var old = scripts[i]
       if (old === replayScript) continue
       var s = document.createElement('script')
       for (var j = 0; j < old.attributes.length; j++) s.setAttribute(old.attributes[j].name, old.attributes[j].value)
+      var src = s.getAttribute('src') || ''
+      if (src) {
+        if (/tailwind/i.test(src)) hasTailwind = true
+        pending.push(new Promise(function (resolve) {
+          s.addEventListener('load', function () { resolve() }, { once: true })
+          s.addEventListener('error', function () { resolve() }, { once: true })
+        }))
+      }
       s.textContent = old.textContent
       s.setAttribute('data-v-ran', '1')
       old.parentNode.replaceChild(s, old)
     }
+    return { pending: pending, hasTailwind: hasTailwind }
+  }
+
+  function waitForStylesheets() {
+    var links = document.querySelectorAll('link[rel~="stylesheet"]')
+    var waits = []
+    for (var i = 0; i < links.length; i++) {
+      var link = links[i]
+      if (link.sheet) continue
+      waits.push(new Promise(function (resolve) {
+        link.addEventListener('load', function () { resolve() }, { once: true })
+        link.addEventListener('error', function () { resolve() }, { once: true })
+      }))
+    }
+    return waits.length ? Promise.all(waits) : Promise.resolve()
+  }
+
+  function settlePromise(p) {
+    return p && typeof p.then === 'function' ? p.then(function () {}, function () {}) : Promise.resolve()
+  }
+
+  var visualReadySent = false
+  var visualReadyGen = 0
+  function waitForVisualReady(info) {
+    if (visualReadySent) return
+    var gen = ++visualReadyGen
+    var done = false
+    var timer = setTimeout(finish, 2500)
+    function finish() {
+      if (done || gen !== visualReadyGen) return
+      done = true
+      clearTimeout(timer)
+      visualReadySent = true
+      notifyFrameUpdated()
+      parent.postMessage({ type: 'doop:frame-visual-ready' }, '*')
+    }
+    var scriptsWait = info && info.pending && info.pending.length ? Promise.all(info.pending) : Promise.resolve()
+    scriptsWait
+      .then(function () {
+        return Promise.all([
+          waitForStylesheets(),
+          settlePromise(info && info.dsPromise),
+          settlePromise(window.__doopReady),
+        ])
+      })
+      .then(function () {
+        return waitForStylesheets()
+      })
+      .then(function () {
+        if (info && info.hasTailwind) {
+          return new Promise(function (resolve) { setTimeout(resolve, 40) })
+        }
+      })
+      .then(function () {
+        if (document.fonts && document.fonts.ready) {
+          return Promise.race([
+            settlePromise(document.fonts.ready),
+            new Promise(function (resolve) { setTimeout(resolve, 350) }),
+          ])
+        }
+      })
+      .then(function () {
+        requestAnimationFrame(function () {
+          requestAnimationFrame(finish)
+        })
+      }, finish)
   }
 
   function render(html) {
     holdStill()
     try {
-      morph(html)
+      return morph(html)
     } finally {
       releaseStill()
     }
   }
   function morph(html) {
     var doc
+    var scriptInfo = { pending: [], hasTailwind: false }
+    var dsPromise = null
     try {
       doc = new DOMParser().parseFromString(html, 'text/html')
       syncAttrs(document.documentElement, doc.documentElement)
@@ -263,9 +343,9 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       syncAttrs(document.body, doc.body)
       morphChildren(document.head, doc.head)
       morphChildren(document.body, doc.body)
-      activateScripts()
+      scriptInfo = activateScripts()
       if (window.__doopSyncDs) {
-        var dsPromise = window.__doopSyncDs(dsOrigin)
+        dsPromise = window.__doopSyncDs(dsOrigin)
         if (dsPromise && dsPromise.then) dsPromise.then(notifyFrameUpdated, notifyFrameUpdated)
       }
       syncPathVisibility()
@@ -288,6 +368,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
         }
       }
     }
+    return { pending: scriptInfo.pending, hasTailwind: scriptInfo.hasTailwind, dsPromise: dsPromise }
   }
 
   /* ---- inline text editing ----
@@ -2129,10 +2210,11 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     }
     if (d.type === 'doop:html' && typeof d.html === 'string' && !editing) {
       if (typeof d.origin === 'string' && d.origin) dsOrigin = d.origin
-      render(d.html)
+      var renderInfo = render(d.html)
       notifyFrameUpdated()
       protoHtmlChanged()
       if (d.reqId) parent.postMessage({ type: 'doop:html-result', reqId: d.reqId }, '*')
+      waitForVisualReady(renderInfo)
     }
     if (d.type === 'doop:text-format' && Array.isArray(d.selectors)) {
       parent.postMessage({ type: 'doop:text-format-result', reqId: d.reqId, selectors: formatLayers(d.selectors, d.command) }, '*')
