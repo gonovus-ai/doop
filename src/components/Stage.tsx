@@ -728,10 +728,13 @@ export function Stage({
     }
 
     function onWheel(e: WheelEvent) {
-      /* let overlays with their own scrollbar scroll instead of panning */
-      if ((e.target as Element | null)?.closest('[data-stage-scroll]')) return
+      const pinch = e.ctrlKey || e.metaKey
+      /* let overlays with their own scrollbar (an open comment thread, its
+         composer) scroll instead of panning. A pinch over one still zooms the
+         canvas: left to the browser it would zoom the whole page. */
+      if (!pinch && (e.target as Element | null)?.closest('[data-stage-scroll]')) return
       e.preventDefault()
-      if (e.ctrlKey || e.metaKey) {
+      if (pinch) {
         const rect = el!.getBoundingClientRect()
         pivotX = e.clientX - rect.left
         pivotY = e.clientY - rect.top

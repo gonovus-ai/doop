@@ -136,6 +136,47 @@ describe.skipIf(!findBrowserPath())('comment thread stacking', { timeout: 30_000
     }
   })
 
+  /* the camera once took every wheel over the stage, so a thread longer than
+     its box could not be read to the end */
+  it('scrolls a long thread with the wheel instead of panning the canvas', async () => {
+    await seed(undefined, { ...COMMENT, text: Array.from({ length: 60 }, (_, i) => `Line ${i + 1}`).join('\n') })
+    await (await page.waitForSelector('[title^="Tester:"]'))!.click()
+    const popover = (await page.waitForSelector('[data-comment-popover]'))!
+    await page.evaluate(() => Promise.all(document.getAnimations().map((a) => a.finished)))
+    const scrollTop = () =>
+      page.evaluate(() => document.querySelector('[data-comment-popover] .overflow-y-auto')!.scrollTop)
+    const painted = () => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => done(null))))
+    /* a long thread opens on its newest words, at the bottom */
+    const opened = await scrollTop()
+    expect(opened).toBeGreaterThan(0)
+    const place = await offsetFromPin()
+    const pin = (await (await page.$('[title^="Tester:"]'))!.boundingBox())!
+    const box = (await popover.boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + 60)
+
+    await page.mouse.wheel({ deltaY: -120 })
+    await page.waitForFunction(
+      (opened) => document.querySelector('[data-comment-popover] .overflow-y-auto')!.scrollTop < opened,
+      {},
+      opened,
+    )
+    await painted()
+    expect((await (await page.$('[title^="Tester:"]'))!.boundingBox())!).toEqual(pin)
+
+    /* a pinch over the thread is still the canvas's: the page itself never zooms */
+    const scrolled = await scrollTop()
+    await page.keyboard.down('Control')
+    await page.mouse.wheel({ deltaY: -40 })
+    await page.keyboard.up('Control')
+    await page.waitForFunction(
+      (y) => document.querySelector('[title^="Tester:"]')!.getBoundingClientRect().y !== y,
+      {},
+      pin.y,
+    )
+    expect(await scrollTop()).toBe(scrolled)
+    expect(await offsetFromPin()).toEqual(place)
+  })
+
   it("paints above another frame's size badge", async () => {
     /* the pin sits by back's bottom edge, so the thread hangs over the badge
        under front, which is selected */
