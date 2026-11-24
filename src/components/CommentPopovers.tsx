@@ -263,7 +263,12 @@ export function CommentComposer({
   const canAskAgents = useStore(canEditOpenCanvas)
   const mentioned = useAgentMention(text, mentions.picked(text))
   return (
-    <div className="w-[240px] rounded-[10px] border border-line bg-surface p-2 shadow-pop animate-[chip-in_0.18s_ease]">
+    <div
+      /* the wheel scrolls a long draft, the agent pills and the @ and / menus
+         instead of panning the canvas under them */
+      data-stage-scroll
+      className="w-[240px] rounded-[10px] border border-line bg-surface p-2 shadow-pop animate-[chip-in_0.18s_ease]"
+    >
       <div className="relative">
         {skillMenu.menu}
         <Textarea
@@ -426,6 +431,9 @@ export function CommentThread({
   return (
     <div
       data-comment-popover
+      /* the wheel scrolls a long thread (and its reply field and menus)
+         instead of panning the canvas under it */
+      data-stage-scroll
       className="absolute top-[calc(100%_+_8px)] left-1/2 w-[250px] -translate-x-1/2 cursor-default rounded-[10px] border border-line bg-surface p-2.5 text-left shadow-pop animate-[chip-in_0.18s_ease]"
       onClick={(e) => e.stopPropagation()}
       /* inside the thread the browser's own menu (copy, paste) stays */
