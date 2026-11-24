@@ -5,8 +5,10 @@ import { cn } from '@/lib/utils'
 import { BrandMark, type Brand } from './ui/brand-mark'
 import { EffortSlider } from './ConnectionTable'
 import { DoopMark } from './Logo'
+import { RoleMark } from './RoleMark'
 import { useAgentModels } from './ModelAccount'
-import { useAgentRunners, useRunnerPick } from '../lib/runnerPick'
+import { resolveExternalAgent, useAgentRunners, useRunnerPick } from '../lib/runnerPick'
+import { useStore } from '../lib/store'
 import { resolveRunnerPick, type AgentRunner, type RunnerOption, type RunnerProvider } from '../../shared/agentRunner'
 import { useT, type PlainMessageKey } from '@/lib/i18n'
 import {
@@ -75,7 +77,12 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
   const [open, setOpen] = useState(false)
   const runners = useAgentRunners()
   const stored = useRunnerPick((s) => s.stored)
+  const externalAgentId = useRunnerPick((s) => s.externalAgentId)
   const setPick = useRunnerPick((s) => s.setPick)
+  const setExternalAgent = useRunnerPick((s) => s.setExternalAgent)
+  const team = useStore((s) => s.canvas?.team)
+  const externalAgents = (team ?? []).filter((r) => r.external)
+  const activeExternal = resolveExternalAgent(team, externalAgentId, runners)
   const resolved = resolveRunnerPick(runners, stored)
   /* the picked account's live catalog, asked for once the menu opens; the
      other connections show their curated menus */
@@ -84,10 +91,14 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
   const modelsOf = (runner: AgentRunner): RunnerOption[] =>
     runner.provider === liveKind && catalog?.live ? catalog.models : runner.models
 
-  const label = resolved ? modelName(modelsOf(resolved.runner), resolved.pick.model ?? '') : 'Doop Agent'
-  const mark = resolved ? PROVIDER_MARK[resolved.runner.provider] : undefined
+  const label = activeExternal
+    ? activeExternal.name
+    : resolved
+      ? modelName(modelsOf(resolved.runner), resolved.pick.model ?? '')
+      : 'Doop Agent'
+  const mark = activeExternal ? undefined : resolved ? PROVIDER_MARK[resolved.runner.provider] : undefined
   /* the effort reads after the model, lighter, as in Settings */
-  const effortId = resolved?.pick.effort
+  const effortId = activeExternal ? undefined : resolved?.pick.effort
   const effortKey = effortId ? EFFORT_NAMES[effortId] : undefined
   const effortLabel = effortId
     ? effortKey
@@ -99,6 +110,11 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
     const effort = resolved?.runner.provider === runner.provider ? resolved.pick.effort : runner.effort
     setPick({ provider: runner.provider, model, ...(effort ? { effort } : {}) })
     posthog.capture('agent_runner_picked', { provider: runner.provider, model, via: 'composer' })
+  }
+
+  function chooseExternal(agentId: string) {
+    setExternalAgent(agentId)
+    posthog.capture('agent_runner_picked', { provider: 'external', model: agentId, via: 'composer' })
   }
 
   function chooseEffort(effort: string) {
@@ -114,12 +130,14 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
       <DropdownMenuTrigger asChild>
         <MenuButton
           variant="quiet"
-          disabled={disabled || !runners}
+          disabled={disabled || (!runners && externalAgents.length === 0)}
           aria-label={t('panels.modelAria', { label })}
           className={cn('min-w-0 shrink gap-[5px]')}
           icon={
-            <span className="grid size-3 flex-none place-items-center">
-              {mark ? (
+            <span className="grid size-3.5 flex-none place-items-center">
+              {activeExternal ? (
+                <RoleMark role={activeExternal} size={13} />
+              ) : mark ? (
                 <BrandMark brand={mark} size={12} />
               ) : (
                 /* no connection behind it: the agent's own mark */
@@ -134,6 +152,23 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
         </MenuButton>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="top" align="end" width="auto">
+        {externalAgents.length > 0 && (
+          <>
+            <DropdownMenuCaption>{t('panels.modelExternalAgents')}</DropdownMenuCaption>
+            <DropdownMenuRadioGroup value={activeExternal?.id ?? ''} onValueChange={chooseExternal}>
+              {externalAgents.map((agent) => (
+                <DropdownMenuRadioItem key={agent.id} value={agent.id} title={agent.blurb}>
+                  <span className="inline-flex items-center gap-1.5">
+                    <RoleMark role={agent} size={13} />
+                    <span>{agent.name}</span>
+                    <span className="text-ink-faint">@{agent.id}</span>
+                  </span>
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+            <DropdownMenuSeparator />
+          </>
+        )}
         {runners && runners.runners.length > 0 ? (
           <>
             {runners.runners.map((runner) => (
@@ -143,7 +178,9 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
                   {runners.runners.length > 1 ? runner.name : t('models.model')}
                 </DropdownMenuCaption>
                 <DropdownMenuRadioGroup
-                  value={resolved?.runner.provider === runner.provider ? (resolved.pick.model ?? '') : ''}
+                  value={
+                    !activeExternal && resolved?.runner.provider === runner.provider ? (resolved.pick.model ?? '') : ''
+                  }
                   onValueChange={(model) => choose(runner, model)}
                 >
                   {modelsOf(runner).map((m) => (
@@ -157,7 +194,7 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
             {catalog?.error && liveKind && (
               <DropdownMenuCaption className="pb-2 text-ink-faint">{catalog.error}</DropdownMenuCaption>
             )}
-            {resolved?.runner.efforts && (
+            {!activeExternal && resolved?.runner.efforts && (
               <>
                 <DropdownMenuSeparator />
                 <EffortSlider
@@ -175,6 +212,13 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
                 />
               </>
             )}
+            <DropdownMenuSeparator />
+          </>
+        ) : externalAgents.length > 0 ? (
+          <>
+            <DropdownMenuRadioGroup value={activeExternal ? '' : 'doop'} onValueChange={() => setExternalAgent('')}>
+              <DropdownMenuRadioItem value="doop">{t('panels.modelBuiltInAgent')}</DropdownMenuRadioItem>
+            </DropdownMenuRadioGroup>
             <DropdownMenuSeparator />
           </>
         ) : (

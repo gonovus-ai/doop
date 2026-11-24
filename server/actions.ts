@@ -1853,6 +1853,59 @@ export function completeCard(canvasId: string, cardId: string): AgentTask | unde
   return card
 }
 
+/** Claim a specific queued card (for external agents called via webhook or MCP)
+ *  so the canvas chat transitions from "Waiting for an agent…" to "Working on it…". */
+export function claimCardById(
+  canvasId: string,
+  cardId: string,
+  agentName: string,
+): { ok: true; card: AgentTask; alreadyClaimed?: boolean } | { ok: false; error: string } {
+  const card = (taskLog.get(canvasId) ?? []).find((t) => t.id === cardId && t.queuedBy)
+  if (!card) return { ok: false, error: 'card not found' }
+  if (card.endedAt || card.failedAt) return { ok: false, error: 'card already finished' }
+  if (card.agentName) {
+    if (card.agentName.toLowerCase() === agentName.toLowerCase()) {
+      return { ok: true, card, alreadyClaimed: true }
+    }
+    return { ok: false, error: `card already claimed by ${card.agentName}` }
+  }
+  edit(card).agentName = agentName
+  card.color = colorFor(agentName)
+  card.claimedAt = Date.now()
+  stored.saveTask(canvasId, card)
+  broadcast(canvasId, { type: 'task', task: card })
+  return { ok: true, card }
+}
+
+/** Record an external agent's chat reply on a card and advance/complete (or fail) it. */
+export function replyAndCompleteCard(
+  canvasId: string,
+  cardId: string,
+  by: Actor,
+  options?: { reply?: string; failedReason?: string },
+): { ok: true; card: AgentTask } | { ok: false; error: string } {
+  const card = (taskLog.get(canvasId) ?? []).find((t) => t.id === cardId && t.queuedBy)
+  if (!card) return { ok: false, error: 'card not found' }
+  if (!card.agentName) {
+    edit(card).agentName = by.name
+    card.color = colorFor(by.name)
+    card.claimedAt = Date.now()
+  }
+  const cleanReply = options?.reply?.trim().slice(0, 8_000)
+  if (cleanReply) {
+    edit(card).reply = cleanReply
+  }
+  stored.saveTask(canvasId, card)
+  broadcast(canvasId, { type: 'task', task: card })
+  const cleanFail = options?.failedReason?.trim().slice(0, 500)
+  if (cleanFail) {
+    const failed = failCard(canvasId, cardId, cleanFail)
+    return { ok: true, card: failed ?? card }
+  }
+  const advanced = advanceCard(canvasId, cardId, by)
+  return { ok: true, card: advanced ?? card }
+}
+
 /** An unsuccessful card stays paused until a human explicitly retries it.
  *  Failing it again before that retry changes nothing — the first reason
  *  stands, and the failure is announced once. */

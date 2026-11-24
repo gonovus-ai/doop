@@ -13,7 +13,7 @@ import { DoopMark } from './Logo'
 import { ArrowUpIcon, AttachmentIcon, BookOpenIcon, FrameIcon, XIcon } from './ui/icons'
 import { ModelPicker } from './ModelPicker'
 import { useSkillMenu } from './SkillMenu'
-import { currentRunnerPick, useRunnerPick } from '../lib/runnerPick'
+import { currentRunnerPick, resolveExternalAgent, useRunnerPick } from '../lib/runnerPick'
 import { resolveRunnerPick } from '../../shared/agentRunner'
 import { AGENT_ROLES, DEFAULT_ROLE_ID, mentionedRoles } from '../../shared/agents'
 import { LayerKindIcon } from './LayerKindIcon'
@@ -122,12 +122,20 @@ async function sendPrompt(args: {
   const { canvasId, text, files, scope, allowance } = args
   const store = useStore.getState()
   if (store.composerSend?.status === 'busy') return
+  const team = store.canvas?.team ?? AGENT_ROLES
+  const mentioned = mentionedRoles(text, team).map((role) => role.id)
+  const runnerState = useRunnerPick.getState()
+  const pickedExternal = resolveExternalAgent(team, runnerState.externalAgentId, runnerState.runners)
+  const targetAgents = mentioned.length > 0 ? mentioned : pickedExternal ? [pickedExternal.id] : [DEFAULT_ROLE_ID]
+  const allExternal =
+    targetAgents.length > 0 && targetAgents.every((id) => team.find((r) => r.id === id)?.external === true)
+
   /* known-doomed send: no free tasks and no model account. Open the wall
      up front instead of uploading attachments only to 403 — but confirm
      against the server first, since the cached allowance can be stale
-     (an account connected in another tab). The server enforces either
-     way, so an unreachable check just falls through. Text stays in place. */
-  if (allowance && !allowance.byoModel && allowance.used >= allowance.limit) {
+     (an account connected in another tab). External webhook agents run on
+     their own runtime and do not consume resident allowance. */
+  if (!allExternal && allowance && !allowance.byoModel && allowance.used >= allowance.limit) {
     setSend({ canvasId, status: 'busy' })
     const fresh = await api.agentAllowance().catch(() => null)
     setSend(null)
@@ -145,30 +153,33 @@ async function sendPrompt(args: {
     const refFrames = await uploadImageFrames(canvasId, files, { fallbackName: 'Attached image' })
     /* the composer's pick rides on the card, so the task runs on what the
        picker beside the send button shows */
-    const runner = currentRunnerPick()
-    /* "@copy tighten the hero" goes to the Copywriter, "@copy @a11y …" to
-       both in that order; no mention is Doop's */
-    const mentioned = mentionedRoles(text, store.canvas?.team ?? AGENT_ROLES).map((role) => role.id)
+    const runner = allExternal ? undefined : currentRunnerPick()
     await api.addCard(
       canvasId,
       text,
-      mentioned.length > 0 ? mentioned : [DEFAULT_ROLE_ID],
+      targetAgents,
       refFrames.map((f) => f.id),
       scope,
       runner,
     )
     posthog.capture('prompt_bar_submitted', {
       attachments: refFrames.length,
-      agents: mentioned.length,
+      agents: targetAgents.length,
       scope: scope ? (scope.selector ? 'element' : 'frame') : 'none',
-      runner: runner?.provider ?? 'default',
+      runner: allExternal ? 'external' : (runner?.provider ?? 'default'),
     })
     flyToNextFrame(
       canvasId,
       refFrames.map((f) => f.id),
     )
     store.setComposerDraft(canvasId, '')
-    const sent: ComposerSend = { canvasId, status: 'sent', at: Date.now() }
+    const firstRole = team.find((r) => r.id === targetAgents[0])
+    const sent: ComposerSend = {
+      canvasId,
+      status: 'sent',
+      at: Date.now(),
+      ...(allExternal && firstRole ? { agentName: firstRole.name } : {}),
+    }
     setSend(sent)
     window.setTimeout(() => {
       if (useStore.getState().composerSend === sent) setSend(null)
@@ -218,9 +229,12 @@ export function PromptBar({ canvasId }: { canvasId: string }) {
   const busy = send?.status === 'busy'
   const sent = send?.status === 'sent'
   const sendError = send?.status === 'error' ? send.message : null
+  const team = useStore((s) => s.canvas?.team)
+  const sentAgentName = send?.status === 'sent' ? send.agentName : undefined
   const { allowance } = useAllowance()
   /* the meter names the connection the next task goes to: the composer's pick */
   const runnerStore = useRunnerPick()
+  const activeExternal = resolveExternalAgent(team, runnerStore.externalAgentId, runnerStore.runners)
   const picked = resolveRunnerPick(runnerStore.runners, runnerStore.stored)
   const pickedProvider = picked?.pick.provider
   /* the selection is the prompt's scope until the chip is dismissed — × or
@@ -260,7 +274,7 @@ export function PromptBar({ canvasId }: { canvasId: string }) {
     offerNew: true,
   })
   const t = useT()
-  const meter = meterText(allowance, t, pickedProvider, picked?.runner.name)
+  const meter = activeExternal ? null : meterText(allowance, t, pickedProvider, picked?.runner.name)
 
   useLayoutEffect(() => {
     if (inputRef.current) autosize(inputRef.current)
@@ -440,7 +454,9 @@ export function PromptBar({ canvasId }: { canvasId: string }) {
               ? chip.kind === 'frame'
                 ? t('panels.promptPlaceholderFrame')
                 : t('panels.promptPlaceholderElement')
-              : t('panels.promptPlaceholder')
+              : activeExternal
+                ? t('panels.promptPlaceholderAgent', { name: activeExternal.name })
+                : t('panels.promptPlaceholder')
           }
           {...skillMenu.inputProps}
           onKeyDown={onKeyDown}
@@ -511,7 +527,8 @@ export function PromptBar({ canvasId }: { canvasId: string }) {
             </Note>
           ) : (
             <Note size="sm" className="text-[11px] text-ink-soft">
-              <DoopMark size={11} /> {t('panels.promptSent')}
+              <DoopMark size={11} />{' '}
+              {sentAgentName ? t('panels.promptSentAgent', { name: sentAgentName }) : t('panels.promptSent')}
             </Note>
           )}
         </div>

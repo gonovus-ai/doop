@@ -2137,6 +2137,72 @@ export function buildMcpServer(
   )
 
   server.registerTool(
+    'claim_card',
+    {
+      title: 'Claim a queued chat/board card as in progress',
+      description:
+        'Mark a queued prompt card (from the canvas Agents chat or SpecFlow webhook) as claimed/in-progress by this agent so humans immediately see "<Your Name> Working on it…" in the canvas chat. Call this when you receive an agent.card_assigned webhook (or find a queued card in list_mentions).',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z.string(),
+        card_id: z.string().describe('The card_id from the agent.card_assigned webhook or list_mentions'),
+        agent_name: agentName.optional(),
+      },
+    },
+    async ({ canvas_id, card_id, agent_name }) => {
+      if (!canvasFor(canvas_id, 'edit')) return noCanvas(canvas_id)
+      const actor = actorFrom(agent_name)
+      arrive(canvas_id, agent_name)
+      const result = actions.claimCardById(canvas_id, card_id, actor.name)
+      if (!result.ok) return err(result.error)
+      return text({
+        ok: true,
+        id: result.card.id,
+        agentName: result.card.agentName,
+        alreadyClaimed: !!result.alreadyClaimed,
+      })
+    },
+  )
+
+  server.registerTool(
+    'complete_card',
+    {
+      title: 'Reply to and complete a chat/board card',
+      description:
+        'Post your reply into the canvas Agents chat and mark the assigned card done (or hand off to the next pipeline stage). Pass failed_reason instead if you could not complete the request.',
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        canvas_id: z.string(),
+        card_id: z.string().describe('The card_id being completed'),
+        reply: z
+          .string()
+          .max(8_000)
+          .optional()
+          .describe('Your reply shown directly to the user in the canvas Agents chat'),
+        failed_reason: z.string().max(500).optional().describe('Optional failure reason if the task could not finish'),
+        agent_name: agentName.optional(),
+      },
+    },
+    async ({ canvas_id, card_id, reply, failed_reason, agent_name }) => {
+      if (!canvasFor(canvas_id, 'edit')) return noCanvas(canvas_id)
+      const actor = actorFrom(agent_name)
+      arrive(canvas_id, agent_name)
+      const result = actions.replyAndCompleteCard(canvas_id, card_id, actor, {
+        reply,
+        failedReason: failed_reason,
+      })
+      if (!result.ok) return err(result.error)
+      return text({
+        ok: true,
+        id: result.card.id,
+        agentName: result.card.agentName,
+        endedAt: result.card.endedAt,
+        failedAt: result.card.failedAt,
+      })
+    },
+  )
+
+  server.registerTool(
     'list_mentions',
     {
       title: 'List unhandled mentions and assignments for an agent',

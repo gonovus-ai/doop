@@ -38,7 +38,7 @@ export type PanelTab = 'tasks' | 'comments' | 'activity' | 'memory'
  *  a failure must still be there when the tab comes back. */
 export type ComposerSend =
   | { canvasId: string; status: 'busy' }
-  | { canvasId: string; status: 'sent'; at: number }
+  | { canvasId: string; status: 'sent'; at: number; agentName?: string }
   | { canvasId: string; status: 'error'; message: string; at: number }
 
 /** Who is streaming into a frame: enough to name, colour and identify them. */

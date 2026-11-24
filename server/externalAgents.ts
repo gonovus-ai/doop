@@ -184,7 +184,10 @@ function formatTextPayload(payload: ExternalAgentPayload): string {
       : []),
     ...(payload.elementId ? [`Element: data-doop-id="${payload.elementId}"`] : []),
     ...(payload.card_id
-      ? [`Card: ${payload.card_id} (stage ${(payload.stage ?? 0) + 1}/${payload.pipeline?.length ?? 1})`]
+      ? [
+          `Card: ${payload.card_id} (stage ${(payload.stage ?? 0) + 1}/${payload.pipeline?.length ?? 1})`,
+          'Workflow: call claim_card(canvas_id, card_id) first, perform the canvas work, then call complete_card(canvas_id, card_id, reply) to reply in the canvas chat.',
+        ]
       : []),
     ...(payload.task_id
       ? [`Task: ${payload.task_id}${payload.feedback_id ? ` (feedback: ${payload.feedback_id})` : ''}`]

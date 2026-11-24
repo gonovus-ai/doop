@@ -335,6 +335,23 @@ describe('External Agent webhook push, claim, reply identity, thread replies, ca
     expect(hook.body.card_id).toBe(card.id)
     expect(hook.body.text).toBe('重绘登录卡片')
     expect(hook.body.frame_id).toBe(frameId)
+
+    // External agent claims the chat card, then posts its reply & completes it via MCP
+    const claimRes = await mcpCall(agentKeySecret, 'claim_card', {
+      canvas_id: canvasId,
+      card_id: card.id,
+    })
+    expect(claimRes.isError).toBe(false)
+    expect(claimRes.data).toMatchObject({ ok: true, id: card.id, agentName: 'Claude' })
+
+    const completeRes = await mcpCall(agentKeySecret, 'complete_card', {
+      canvas_id: canvasId,
+      card_id: card.id,
+      reply: '已重绘登录卡片并更新对比度。',
+    })
+    expect(completeRes.isError).toBe(false)
+    expect(completeRes.data).toMatchObject({ ok: true, id: card.id, agentName: 'Claude' })
+    expect((completeRes.data as { endedAt?: number }).endedAt).toBeTypeOf('number')
   })
 
   it('pushes agent.feedback_received when human leaves feedback on the external agent task', async () => {
