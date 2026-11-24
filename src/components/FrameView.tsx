@@ -1084,10 +1084,10 @@ export const FrameView = memo(function FrameView({
   }, [])
   /* safety valve: never leave a frame hidden if a slow or broken external asset stalls */
   useEffect(() => {
-    if (visualReady) return
-    const timer = window.setTimeout(() => setVisualReady(true), 3200)
+    if (visualReady || !runtimeReady) return
+    const timer = window.setTimeout(() => setVisualReady(true), 9000)
     return () => window.clearTimeout(timer)
-  }, [visualReady])
+  }, [visualReady, runtimeReady])
   /* the runtime insets its body by the margin once the iframe has grown by it */
   useLayoutEffect(() => {
     if (runtimeReady) iframeRef.current?.contentWindow?.postMessage({ type: 'doop:bleed', px: bleed }, '*')

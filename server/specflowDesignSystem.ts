@@ -114,13 +114,28 @@ function putInCache(key: string, entry: CachedAsset): CachedAsset {
   return entry
 }
 
+const BLOCKING_FONT_IMPORT_RE =
+  /@import\s+(?:url\(\s*)?["']https?:\/\/(?:fonts\.googleapis\.com|fonts\.gstatic\.com|use\.typekit\.net)[^"']*["']\s*\)?[^;]*;\s*/gi
+
+/** Strip render-blocking external font @import rules from hosted DS stylesheets
+ *  so a slow or blocked font CDN (e.g. fonts.googleapis.com) never prevents the
+ *  entire component stylesheet from applying inside canvas iframes. */
+export function sanitizeDsCss(raw: Buffer, contentType: string): Buffer {
+  if (!contentType.startsWith('text/css')) return raw
+  const text = raw.toString('utf8')
+  if (!BLOCKING_FONT_IMPORT_RE.test(text)) return raw
+  BLOCKING_FONT_IMPORT_RE.lastIndex = 0
+  return Buffer.from(text.replace(BLOCKING_FONT_IMPORT_RE, ''), 'utf8')
+}
+
 function buildCachedEntry(
-  raw: Buffer,
+  rawInput: Buffer,
   contentType: string,
   compress: boolean,
   isLatest: boolean,
   now: number,
 ): CachedAsset {
+  const raw = sanitizeDsCss(rawInput, contentType)
   const gzip = compress ? gzipSync(raw, { level: 6 }) : undefined
   const etag = `"${createHash('sha1').update(raw).digest('hex').slice(0, 16)}"`
   const ttlMs = isLatest ? LATEST_TTL_MS : PINNED_TTL_MS

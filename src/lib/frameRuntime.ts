@@ -259,12 +259,20 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return { pending: pending, hasTailwind: hasTailwind }
   }
 
+  function isFontCdnUrl(href) {
+    var h = String(href || '').toLowerCase()
+    return h.indexOf('fonts.googleapis.com') !== -1 || h.indexOf('fonts.gstatic.com') !== -1 || h.indexOf('use.typekit.net') !== -1
+  }
+
   function waitForStylesheets() {
     var links = document.querySelectorAll('link[rel~="stylesheet"]')
     var waits = []
     for (var i = 0; i < links.length; i++) {
       var link = links[i]
       if (link.sheet) continue
+      var href = link.getAttribute('href') || ''
+      /* external font CDNs may be slow or blocked; never stall layout CSS reveal on them */
+      if (isFontCdnUrl(href)) continue
       waits.push(new Promise(function (resolve) {
         link.addEventListener('load', function () { resolve() }, { once: true })
         link.addEventListener('error', function () { resolve() }, { once: true })
@@ -298,7 +306,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     if (visualReadySent) return
     var gen = ++visualReadyGen
     var done = false
-    var timer = setTimeout(finish, 2500)
+    var timer = setTimeout(finish, 8000)
     function finish() {
       if (done || gen !== visualReadyGen) return
       done = true
