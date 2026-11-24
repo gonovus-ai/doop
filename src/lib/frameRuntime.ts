@@ -240,6 +240,8 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     for (var i = 0; i < scripts.length; i++) {
       var old = scripts[i]
       if (old === replayScript) continue
+      var scriptType = (old.getAttribute('type') || '').trim().toLowerCase()
+      if (scriptType === 'application/json' || scriptType === 'application/ld+json') continue
       var s = document.createElement('script')
       for (var j = 0; j < old.attributes.length; j++) s.setAttribute(old.attributes[j].name, old.attributes[j].value)
       var src = s.getAttribute('src') || ''
@@ -275,6 +277,21 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
     return p && typeof p.then === 'function' ? p.then(function () {}, function () {}) : Promise.resolve()
   }
 
+  var dsAutoFitSent = false
+  function maybeReportDsAutoFit() {
+    if (dsAutoFitSent || !document.body || !document.body.hasAttribute('data-doop-autofit')) return
+    var el = document.body.querySelector('doop-ds')
+    if (!el) return
+    var target = el.querySelector('[data-doop-ds-root] > *') || el
+    var rect = target.getBoundingClientRect()
+    var w = Math.ceil(rect.width)
+    var h = Math.ceil(rect.height)
+    if (w >= 16 && h >= 16) {
+      dsAutoFitSent = true
+      parent.postMessage({ type: 'doop:ds-autofit', width: w, height: h }, '*')
+    }
+  }
+
   var visualReadySent = false
   var visualReadyGen = 0
   function waitForVisualReady(info) {
@@ -287,6 +304,7 @@ export const FRAME_BOOTSTRAP = `<!doctype html>
       done = true
       clearTimeout(timer)
       visualReadySent = true
+      maybeReportDsAutoFit()
       notifyFrameUpdated()
       parent.postMessage({ type: 'doop:frame-visual-ready' }, '*')
     }

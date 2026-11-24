@@ -12,7 +12,7 @@ import {
 import { createPortal } from 'react-dom'
 import type { ElementComment, Frame } from '../../shared/types'
 import { canEditOpenCanvas, pickedSelectors, useStore } from '../lib/store'
-import { isCanvasElement } from '../lib/drawing'
+import { isCanvasElement, isTransparentFrame } from '../lib/drawing'
 import { isLayerLocked, standaloneSelector } from '../lib/layerEdits'
 import { documentRect } from '../lib/frameBleed'
 import { drawingDropFrame, moveDrawing, type DrawingHit } from '../lib/drawingMove'
@@ -928,6 +928,10 @@ export const FrameView = memo(function FrameView({
      frame there, and the menu's own box is not that point once Radix has
      flipped or shifted it away from a viewport edge */
   const menuAt = useRef({ x: 0, y: 0 })
+  const frameIdRef = useRef(frame.id)
+  useEffect(() => {
+    frameIdRef.current = frame.id
+  }, [frame.id])
   const [runtimeReady, setRuntimeReady] = useState(false)
   /* hides the iframe under a subtle loading skeleton on first mount until its
      stylesheets, Tailwind/DS scripts, and React components finish painting —
@@ -1042,6 +1046,29 @@ export const FrameView = memo(function FrameView({
       }
       if (ev.data?.type === 'doop:frame-visual-ready' && win && ev.source === win) {
         setVisualReady(true)
+      }
+      if (ev.data?.type === 'doop:ds-autofit' && win && ev.source === win) {
+        const w = Math.round(Number((ev.data as { width?: unknown }).width))
+        const h = Math.round(Number((ev.data as { height?: unknown }).height))
+        const state = useStore.getState()
+        const current = state.canvas?.frames.find((f) => f.id === frameIdRef.current)
+        if (
+          current &&
+          !current.locked &&
+          canEditOpenCanvas(state) &&
+          /\bdata-doop-autofit=/i.test(current.html) &&
+          Number.isFinite(w) &&
+          Number.isFinite(h) &&
+          w >= 16 &&
+          h >= 16
+        ) {
+          const nextW = Math.min(4096, w)
+          const nextH = Math.min(4096, h)
+          const nextHtml = current.html.replace(/\s+data-doop-autofit=(?:"[^"]*"|'[^']*'|[^\s>]+)/i, '')
+          const patch = { width: nextW, height: nextH, html: nextHtml }
+          state.patchFrameLocal(current.id, patch)
+          trackSave(api.updateFrame(current.id, patch).catch(console.error))
+        }
       }
       if (ev.data?.type === 'doop:bleed-want' && win && ev.source === win) {
         const px = Number((ev.data as { px?: unknown }).px)
@@ -2071,7 +2098,7 @@ export const FrameView = memo(function FrameView({
               /* the white a design without a background sits on, one screen
                  pixel in from the edge: painted to the edge, it showed past the
                  scaled iframe's antialiased edge as a light seam */
-              !isCanvasElement(frame.html) &&
+              !isTransparentFrame(frame.html) &&
                 "before:absolute before:inset-[calc(1px/var(--zoom,1))] before:bg-white before:content-['']",
               /* Select keeps the arrow, like Figma: the frame is a thing to
                  point at, not a handle. The Hand tool's grab and the Comment
@@ -2228,7 +2255,7 @@ export const FrameView = memo(function FrameView({
                    scheme reaches this element by inheritance while a
                    standalone element's document is light, so a shape on the
                    dark canvas sat on a white square */
-                  ...(isCanvasElement(frame.html) ? { colorScheme: 'light' } : null),
+                  ...(isTransparentFrame(frame.html) ? { colorScheme: 'light' } : null),
                 }}
               />
             </div>

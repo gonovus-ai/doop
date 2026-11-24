@@ -80,6 +80,12 @@ export function isCanvasElement(html: string): boolean {
   return /<body\b[^>]*\bdata-doop-canvas-element=/i.test(html)
 }
 
+/** Frames that should render without the default white artboard backdrop
+ *  (standalone vector shapes and dropped DS component instances). */
+export function isTransparentFrame(html: string): boolean {
+  return isCanvasElement(html) || /<body\b[^>]*\bdata-doop-transparent=/i.test(html)
+}
+
 export function drawingTarget(point: Point, tool: DrawingTool): DrawingTarget | null {
   const canvas = currentPageCanvas()
   if (!canvas) return null

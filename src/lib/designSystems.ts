@@ -119,7 +119,14 @@ function notifyFailure(error: unknown, fallback: string) {
 }
 
 function standaloneDsFrameHtml(tag: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8" /></head><body style="margin:0;padding:24px;display:flex;align-items:center;justify-content:center;min-height:100vh;box-sizing:border-box">${tag}</body></html>`
+  return `<!doctype html><html style="background:transparent"><head><meta charset="utf-8" /></head><body data-doop-transparent="true" data-doop-autofit="true" style="margin:0;padding:0;background:transparent;font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,'PingFang SC','Noto Sans CJK SC',sans-serif)">${tag}</body></html>`
+}
+
+function initialDsSize(previewSize?: { width?: number; height?: number }): { width: number; height: number } {
+  return {
+    width: Math.max(32, Math.round(previewSize?.width ?? 160)),
+    height: Math.max(24, Math.round(previewSize?.height ?? 48)),
+  }
 }
 
 /** Insert a hosted Design System component into the selected frame, or as a new frame. */
@@ -147,8 +154,7 @@ export async function placeDsComponent(ds: DesignSystemSummary, comp: DesignSyst
       return
     }
     if (!s.canvas) return
-    const width = Math.max(240, (comp.previewSize?.width ?? 240) + 48)
-    const height = Math.max(120, (comp.previewSize?.height ?? 80) + 48)
+    const { width, height } = initialDsSize(comp.previewSize)
     const tag = buildDoopDsTag({ ds: ds.name, component: comp.exportName, props })
     const created = await api.createFrame(s.canvas.id, {
       name: comp.displayName || comp.exportName,
@@ -190,8 +196,7 @@ export async function dropDsComponent(drag: DsComponentDrag, client: { x: number
       }
       return
     }
-    const width = Math.max(240, (drag.previewSize?.width ?? 240) + 48)
-    const height = Math.max(120, (drag.previewSize?.height ?? 80) + 48)
+    const { width, height } = initialDsSize(drag.previewSize)
     const tag = buildDoopDsTag({
       ds: drag.ds,
       component: drag.component,

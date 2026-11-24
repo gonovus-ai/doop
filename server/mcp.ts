@@ -125,7 +125,12 @@ import { usageByComponent } from './componentUsage.ts'
 import type { AgentScope } from '../shared/customAgents.ts'
 import { parseSkillInput } from '../shared/skills.ts'
 import { createSkill, listSkills as listStoredSkills, SkillInputError, skillsForCanvas, updateSkill } from './skills.ts'
-import { getDesignSystemCatalog, wrapDesignSystemJsxHtml, wrapSpecFlowJsxHtml } from './specflowDesignSystem.ts'
+import {
+  extractDesignSystemSource,
+  getDesignSystemCatalog,
+  wrapDesignSystemJsxHtml,
+  wrapSpecFlowJsxHtml,
+} from './specflowDesignSystem.ts'
 import {
   createPublishTicket,
   DesignSystemError,
@@ -1130,6 +1135,12 @@ export function buildMcpServer(
         x: z.number().optional(),
         y: z.number().optional(),
         extra_css: z.string().optional().describe('Optional extra CSS rules appended to the frame <style>'),
+        source_path: z
+          .string()
+          .optional()
+          .describe(
+            'Optional repo-relative JSX source path (e.g. "doop-ds-boards/jsx/home.jsx") stored with the frame',
+          ),
         ds_base_url: z.string().optional().describe('Optional trusted DS base URL override'),
         agent_name: agentName,
       },
@@ -1147,6 +1158,7 @@ export function buildMcpServer(
       x,
       y,
       extra_css,
+      source_path,
       ds_base_url,
       agent_name,
     }) => {
@@ -1159,6 +1171,7 @@ export function buildMcpServer(
           theme: theme ?? 'light',
           title: name,
           extraCss: extra_css,
+          sourcePath: source_path,
           dsBaseUrl: ds_base_url,
         })
       } catch (e) {
@@ -1206,13 +1219,18 @@ export function buildMcpServer(
           ),
         theme: z.enum(['light', 'dark']).optional().describe('Theme mode (default "light")'),
         extra_css: z.string().optional().describe('Optional extra CSS rules appended to the frame <style>'),
+        source_path: z
+          .string()
+          .optional()
+          .describe('Optional repo-relative JSX source path; preserves the existing source_path if omitted'),
         ds_base_url: z.string().optional().describe('Optional trusted DS base URL override'),
         agent_name: agentName,
       },
     },
-    async ({ frame_id, ds_name, ds_version, jsx, theme, extra_css, ds_base_url, agent_name }) => {
+    async ({ frame_id, ds_name, ds_version, jsx, theme, extra_css, source_path, ds_base_url, agent_name }) => {
       const current = frameFor(frame_id, 'edit')
       if (!current) return noFrame(frame_id)
+      const prevSource = extractDesignSystemSource(current.html)
       let html: string
       try {
         html = await wrapDesignSystemJsxHtml(jsx, {
@@ -1221,6 +1239,7 @@ export function buildMcpServer(
           theme: theme ?? 'light',
           title: current.name || frame_id,
           extraCss: extra_css,
+          sourcePath: source_path ?? prevSource?.source_path,
           dsBaseUrl: ds_base_url,
         })
       } catch (e) {
@@ -2740,11 +2759,13 @@ export function buildMcpServer(
       arrive(f.canvasId, agent_name)
       const images = (await imagesForFrames([f.id])).get(f.id)
       const instances = f.html.includes(INSTANCE_ATTR) ? instancesIn(f) : []
+      const dsSource = extractDesignSystemSource(f.html)
       return withFeedbackNotice(
         text({
           ...frameSummary(f, images),
           html: expand_components ? f.html : compactFrameHtml(f),
           ...(instances.length ? { instances } : {}),
+          ...(dsSource ? { ds_source: dsSource } : {}),
         }),
         f.canvasId,
         agent_name ? actorFrom(agent_name) : undefined,

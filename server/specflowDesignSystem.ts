@@ -393,6 +393,38 @@ export interface WrapDesignSystemOptions {
   title?: string
   extraCss?: string
   dsBaseUrl?: string
+  sourcePath?: string
+}
+
+export interface EmbeddedDesignSystemSource {
+  ds_name: string
+  ds_version: string
+  theme: 'light' | 'dark'
+  jsx: string
+  extra_css?: string
+  source_path?: string
+}
+
+const DS_SOURCE_RE = /<script\b[^>]*\bid=["']doop-ds-source["'][^>]*>([\s\S]*?)<\/script>/i
+
+/** Extract original JSX source metadata embedded by `wrapDesignSystemJsxHtml`. */
+export function extractDesignSystemSource(html: string): EmbeddedDesignSystemSource | null {
+  const m = DS_SOURCE_RE.exec(html)
+  if (!m?.[1]) return null
+  try {
+    const parsed = JSON.parse(m[1].trim()) as Partial<EmbeddedDesignSystemSource>
+    if (typeof parsed.ds_name !== 'string' || typeof parsed.jsx !== 'string') return null
+    return {
+      ds_name: parsed.ds_name,
+      ds_version: typeof parsed.ds_version === 'string' && parsed.ds_version ? parsed.ds_version : 'latest',
+      theme: parsed.theme === 'dark' ? 'dark' : 'light',
+      jsx: parsed.jsx,
+      ...(typeof parsed.extra_css === 'string' && parsed.extra_css ? { extra_css: parsed.extra_css } : {}),
+      ...(typeof parsed.source_path === 'string' && parsed.source_path ? { source_path: parsed.source_path } : {}),
+    }
+  } catch {
+    return null
+  }
 }
 
 export type WrapSpecFlowOptions = WrapDesignSystemOptions
@@ -475,12 +507,23 @@ export async function wrapDesignSystemJsxHtml(jsxSource: string, opts: WrapDesig
       '\n        .then(mount)\n        .catch((err) => showErr(err && err.message ? err.message : String(err)));'
     : '      mount();'
 
+  const embeddedSource: EmbeddedDesignSystemSource = {
+    ds_name: dsName,
+    ds_version: dsVersion,
+    theme,
+    jsx: jsxSource,
+    ...(extraCss ? { extra_css: extraCss } : {}),
+    ...(opts.sourcePath?.trim() ? { source_path: opts.sourcePath.trim() } : {}),
+  }
+  const sourceJson = JSON.stringify(embeddedSource).replace(/</g, '\\u003c')
+
   return `<!DOCTYPE html>
 <html lang="zh-CN" class="${isDark ? darkClass : ''}" ${themeAttr}="${theme}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>${escapedTitle}</title>
+  <script type="application/json" id="doop-ds-source">${sourceJson}</script>
 ${preloadLinks}
 ${stylesheetLinks}
   <style>
