@@ -1,0 +1,124 @@
+name: Deploy Azure
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'ios/**'
+      - 'android/**'
+      - 'desktop/**'
+      - '.github/workflows/android.yml'
+      - '.github/workflows/ios*.yml'
+      - '.github/workflows/desktop*.yml'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Optional existing ACR tag to deploy/rollback (leave empty to build from HEAD)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-azure-production
+  cancel-in-progress: false
+
+env:
+  ACR_REGISTRY: gonovusdesignacr.azurecr.io
+  IMAGE_REPO: doop
+  PUBLIC_HEALTHZ_URL: https://design.tools.gonovus.ai/healthz
+
+jobs:
+  build:
+    name: Build & push image
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 25
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - name: Resolve target image tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || '' }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$INPUT_TAG" ]]; then
+            if [[ ! "$INPUT_TAG" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+              echo "Invalid image_tag: $INPUT_TAG" >&2
+              exit 1
+            fi
+            echo "image_tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+            echo "skip_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=sha-${SHORT_SHA:0:12}" >> "$GITHUB_OUTPUT"
+            echo "skip_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout repository
+        if: steps.meta.outputs.skip_build != 'true'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        if: steps.meta.outputs.skip_build != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        if: steps.meta.outputs.skip_build != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push linux/amd64 image
+        if: steps.meta.outputs.skip_build != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_REPO }}:${{ steps.meta.outputs.image_tag }}
+            ${{ env.ACR_REGISTRY }}/${{ env.IMAGE_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to Azure VM
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, doop-azure]
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - name: Pull image and roll out Doop with automatic rollback
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          sudo -n /opt/doop/deploy-doop.sh "$IMAGE_TAG"
+
+      - name: Verify public health endpoint
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$PUBLIC_HEALTHZ_URL")"
+          echo "PUBLIC_HEALTHZ=$status"
+          test "$status" = "200"
+          {
+            echo "### Doop Azure Deployment"
+            echo "- **Image**: \`${ACR_REGISTRY}/${IMAGE_REPO}:${IMAGE_TAG}\`"
+            echo "- **Commit**: \`${GITHUB_SHA}\`"
+            echo "- **Public healthz**: \`${status}\` (${PUBLIC_HEALTHZ_URL})"
+          } >> "$GITHUB_STEP_SUMMARY"
